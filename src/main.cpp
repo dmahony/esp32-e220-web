@@ -10,6 +10,7 @@
 #define E220_TX_PIN   22
 #define E220_M0_PIN   2
 #define E220_M1_PIN   19
+#define E220_AUX_PIN  4
 #define UART_BAUD     9600
 
 AsyncWebServer server(80);
@@ -58,6 +59,44 @@ void setE220Mode(uint8_t mode) {
   delay(50);
 }
 
+// AUX Pin Monitoring (GPIO 4)
+// HIGH = Idle/Ready, LOW = Busy (TX/RX/Processing)
+// Per E220 Manual Section 5.2: typical delay 3ms when idle
+bool isE220Ready() {
+  return digitalRead(E220_AUX_PIN) == HIGH;
+}
+
+// Wait for E220 to become ready with timeout protection
+// timeout_ms: max milliseconds to wait (default 5000ms = 5 seconds)
+// returns: true if ready, false if timeout
+bool waitE220Ready(uint32_t timeout_ms = 5000) {
+  uint32_t start = millis();
+  while (millis() - start < timeout_ms) {
+    if (isE220Ready()) {
+      return true;
+    }
+    delay(10);  // Poll every 10ms to avoid hogging CPU
+  }
+  Serial.printf("[E220] Timeout waiting for AUX ready after %u ms\n", timeout_ms);
+  return false;
+}
+
+// Wait for E220 to become BUSY (AUX goes LOW)
+// Used to detect when module has accepted data for transmission
+// timeout_ms: max milliseconds to wait (default 1000ms)
+// returns: true if busy detected, false if timeout
+bool waitE220Busy(uint32_t timeout_ms = 1000) {
+  uint32_t start = millis();
+  while (millis() - start < timeout_ms) {
+    if (!isE220Ready()) {
+      return true;
+    }
+    delay(5);
+  }
+  Serial.printf("[E220] Timeout waiting for AUX busy after %u ms\n", timeout_ms);
+  return false;
+}
+
 uint8_t baudToReg(int baud) {
   switch(baud) {
     case 1200:   return 0;
@@ -86,7 +125,12 @@ void readE220Config() {
   // Enter CONFIG mode (M0=1, M1=1)
   digitalWrite(E220_M0_PIN, HIGH);
   digitalWrite(E220_M1_PIN, HIGH);
-  delay(100);
+  
+  // Wait for AUX to go HIGH (module ready for config commands)
+  if (!waitE220Ready(1000)) {
+    Serial.println("[E220] Config mode failed - AUX timeout");
+    return;
+  }
   
   // Flush any stale data
   while(e220Serial.available()) e220Serial.read();
@@ -96,7 +140,11 @@ void readE220Config() {
   e220Serial.write(readCmd, 3);
   e220Serial.flush();
   
-  delay(200);
+  // Wait for response with AUX monitoring
+  uint32_t timeout = millis() + 500;
+  while (e220Serial.available() < 9 && millis() < timeout) {
+    delay(10);
+  }
   
   // Response: 0xC1 + START + LEN + ADDH + ADDL + REG0 + REG1 + REG2 + REG3
   if (e220Serial.available() >= 9) {
@@ -133,7 +181,13 @@ void applyE220Config() {
   // Enter CONFIG mode (M0=1, M1=1) - serial port MUST be 9600 8N1 in this mode
   digitalWrite(E220_M0_PIN, HIGH);
   digitalWrite(E220_M1_PIN, HIGH);
-  delay(200);  // Manual says wait for AUX to go high
+  
+  // Wait for AUX to go HIGH per manual Section 5.2
+  if (!waitE220Ready(1000)) {
+    Serial.println("[E220] Config mode failed - AUX timeout");
+    setE220Mode(0);  // Return to normal mode
+    return;
+  }
   
   // Flush any stale data
   while(e220Serial.available()) e220Serial.read();
@@ -224,9 +278,15 @@ void applyE220Config() {
 void setupE220() {
   pinMode(E220_M0_PIN, OUTPUT);
   pinMode(E220_M1_PIN, OUTPUT);
+  pinMode(E220_AUX_PIN, INPUT);  // AUX is a status input (HIGH=ready, LOW=busy)
   e220Serial.begin(UART_BAUD, SERIAL_8N1, E220_RX_PIN, E220_TX_PIN);
   setE220Mode(0);
-  Serial.println("[E220] Init");
+  delay(100);  // Wait for module startup (T1 = ~16ms per manual)
+  if (waitE220Ready(1000)) {
+    Serial.println("[E220] Init - AUX ready");
+  } else {
+    Serial.println("[E220] Init - WARNING: AUX not ready (module may not be responding)");
+  }
 }
 
 void setupWiFi() {
