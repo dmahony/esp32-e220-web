@@ -28,16 +28,15 @@ A dual-device LoRa messaging system using ESP32 + Ebyte E220 900MHz LoRa modules
 
 ## Hardware Wiring
 
-```
-ESP32          E220 Module
-GPIO16 (TX2) → RXD
-GPIO17 (RX2) → TXD
-GPIO4        → AUX
-GND          → GND
-5V (via cap) → VCC (add 10µF cap between VCC-GND near module)
-```
+| ESP32 Pin | E220 Pin | Purpose |
+|-----------|----------|---------|
+| GPIO16 (TX2) | RXD | Serial TX to module |
+| GPIO17 (RX2) | TXD | Serial RX from module |
+| GPIO4 | AUX | Status output (high = ready, low = busy) |
+| GND | GND | Ground |
+| 5V | VCC | Power (add 10µF cap nearby) |
 
-Typical capacitor: 10µF 16V electrolytic, close to module. E220 draws ~500mA at TX peak.
+**Important:** Add 10µF 16V electrolytic capacitor between VCC–GND near the E220 module. E220 draws ~500mA at TX peak, capacitor provides current spike buffering.
 
 ## Installation
 
