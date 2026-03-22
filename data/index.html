@@ -1132,4 +1132,51 @@
           document.getElementById('crypt_l').value = c.crypt_l || 0;
           document.getElementById('savetype').value = c.savetype || 1;
         }
-      });\n\n    // Debug terminal output logging\n    let debugPaused = false;\n    let debugLogBuffer = [];\n    const MAX_LINES = 500;\n    const debugLog = document.getElementById('debug-log');\n\n    function addDebugLine(text) {\n      if (debugPaused) return;\n      debugLogBuffer.push(text);\n      if (debugLogBuffer.length > MAX_LINES) {\n        debugLogBuffer.shift();\n      }\n      updateDebugDisplay();\n    }\n\n    function updateDebugDisplay() {\n      debugLog.textContent = debugLogBuffer.join('\\n');\n      debugLog.parentElement.scrollTop = debugLog.parentElement.scrollHeight;\n    }\n\n    function clearDebugLog() {\n      debugLogBuffer = [];\n      updateDebugDisplay();\n    }\n\n    function toggleDebugPause() {\n      debugPaused = !debugPaused;\n      const btn = document.getElementById('debug-pause-btn');\n      btn.textContent = debugPaused ? 'Resume' : 'Pause';\n      btn.style.background = debugPaused ? '#10b981' : '#3b82f6';\n    }\n\n    // Polling for E220 messages\n    setInterval(() => {\n      fetch('/api/recv')\n        .then(r => r.json())\n        .then(data => {\n          if (data.message) {\n            addDebugLine('[RX] ' + data.message);\n          }\n        })\n        .catch(err => addDebugLine('[ERR] ' + err.message));\n    }, 500);\n  </script>\n</body>\n</html>
+      });
+
+    // Debug terminal output logging
+    let debugPaused = false;
+    let debugLogBuffer = [];
+    const MAX_LINES = 500;
+    const debugLog = document.getElementById('debug-log');
+
+    function addDebugLine(text) {
+      if (debugPaused) return;
+      debugLogBuffer.push(text);
+      if (debugLogBuffer.length > MAX_LINES) {
+        debugLogBuffer.shift();
+      }
+      updateDebugDisplay();
+    }
+
+    function updateDebugDisplay() {
+      debugLog.textContent = debugLogBuffer.join('\n');
+      debugLog.parentElement.scrollTop = debugLog.parentElement.scrollHeight;
+    }
+
+    function clearDebugLog() {
+      debugLogBuffer = [];
+      updateDebugDisplay();
+    }
+
+    function toggleDebugPause() {
+      debugPaused = !debugPaused;
+      const btn = document.getElementById('debug-pause-btn');
+      btn.textContent = debugPaused ? 'Resume' : 'Pause';
+      btn.style.background = debugPaused ? '#10b981' : '#3b82f6';
+    }
+
+    // Polling for E220 messages
+    setInterval(() => {
+      fetch('/api/recv')
+        .then(r => r.json())
+        .then(data => {
+          if (data.message) {
+            addDebugLine('[RX] ' + data.message);
+          }
+        })
+        .catch(err => addDebugLine('[ERR] ' + err.message));
+    }, 500);
+  </script>
+</body>
+</html>
