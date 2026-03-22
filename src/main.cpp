@@ -323,16 +323,24 @@ void applyE220Config() {
   delay(100);
   
   // Return to NORMAL mode (M0=0, M1=0)
-  setE220Mode(0);
+  // Per manual Section 5.2.4 note 3: switching FROM config mode causes the module
+  // to reset user parameters. AUX goes LOW during this reset. MUST wait for it.
+  Serial.println("[E220] Switching back to normal mode (module will reset params)...");
+  digitalWrite(E220_M0_PIN, LOW);
+  digitalWrite(E220_M1_PIN, LOW);
+  
+  // Wait for mode switch to begin (9-11ms per manual)
+  delay(50);
+  
+  // Wait for AUX HIGH - module has finished resetting with new params
+  if (!waitE220Ready(5000)) {
+    Serial.println("[E220] WARNING: Module not ready after config apply! May need power cycle.");
+  }
+  
+  // Extra settling time after param reset
+  delay(200);
   
   Serial.println("[E220] Config applied, back to normal mode");
-  
-  // Switch UART baud if configured differently
-  if (e220_config.baud != UART_BAUD_CONFIG) {
-    Serial.printf("[E220] Switching UART to configured baud rate: %d\n", e220_config.baud);
-    delay(500);  // Wait for E220 to switch (per manual)
-    setE220UARTBaud(e220_config.baud);
-  }
   
   // Read back to verify
   delay(200);
