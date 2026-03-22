@@ -834,12 +834,13 @@ void processRxPacket() {
     return;
   }
   
-  // Build message string, stripping trailing newlines/whitespace
+  // Build message string, keeping all bytes except control chars (0x00-0x1F except tab)
+  // This preserves UTF-8 multi-byte sequences (high bytes 0x80-0xFF)
   String msg = "";
   for (int i = 0; i < msgLen; i++) {
-    char c = (char)rxBuf[i];
-    if (c >= 0x20 || c == '\t') {  // printable chars + tab only
-      msg += c;
+    uint8_t b = rxBuf[i];
+    if (b >= 0x20 || b == '\t') {  // printable ASCII, UTF-8 high bytes (0x80+), and tab
+      msg += (char)b;
     }
   }
   msg.trim();
