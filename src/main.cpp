@@ -28,6 +28,44 @@ HardwareSerial e220Serial(2);
 String chatHistory[100];
 int chatIndex = 0;
 
+// Debug log ring buffer - captures Serial output for web debug tab
+#define DEBUG_LOG_SIZE 4096
+char debugLogBuf[DEBUG_LOG_SIZE];
+int debugLogHead = 0;
+int debugLogTail = 0;
+int debugLogReadPos = 0;  // tracks what web client has already read
+
+void debugLogWrite(const char *str) {
+  while (*str) {
+    debugLogBuf[debugLogHead] = *str++;
+    debugLogHead = (debugLogHead + 1) % DEBUG_LOG_SIZE;
+    if (debugLogHead == debugLogTail) {
+      debugLogTail = (debugLogTail + 1) % DEBUG_LOG_SIZE;  // overwrite oldest
+      if (debugLogReadPos == debugLogTail)
+        debugLogReadPos = (debugLogReadPos + 1) % DEBUG_LOG_SIZE;
+    }
+  }
+}
+
+// Custom Print class that tees to Serial AND debug buffer
+class DebugPrint : public Print {
+public:
+  size_t write(uint8_t c) override {
+    char buf[2] = {(char)c, 0};
+    debugLogWrite(buf);
+    return Serial.write(c);
+  }
+  size_t write(const uint8_t *buffer, size_t size) override {
+    for (size_t i = 0; i < size; i++) {
+      char buf[2] = {(char)buffer[i], 0};
+      debugLogWrite(buf);
+    }
+    return Serial.write(buffer, size);
+  }
+};
+
+DebugPrint dbg;
+
 // TX queue: messages queued from web handler, sent from loop()
 // This avoids blocking the async_tcp task and triggering the watchdog
 String txQueue = "";
@@ -83,7 +121,7 @@ bool waitE220Ready(uint32_t timeout_ms = 5000) {
     }
     delay(10);  // Poll every 10ms to avoid hogging CPU
   }
-  Serial.printf("[E220] Timeout waiting for AUX ready after %u ms\n", timeout_ms);
+  dbg.printf("[E220] Timeout waiting for AUX ready after %u ms\n", timeout_ms);
   return false;
 }
 
@@ -99,13 +137,13 @@ bool waitE220Busy(uint32_t timeout_ms = 1000) {
     }
     delay(5);
   }
-  Serial.printf("[E220] Timeout waiting for AUX busy after %u ms\n", timeout_ms);
+  dbg.printf("[E220] Timeout waiting for AUX busy after %u ms\n", timeout_ms);
   return false;
 }
 
 // Change UART baud rate (switches ESP32 serial port only, doesn't change E220 module)
 void setE220UARTBaud(int baud) {
-  Serial.printf("[E220] Changing UART baud from %d to %d\n", UART_BAUD_CONFIG, baud);
+  dbg.printf("[E220] Changing UART baud from %d to %d\n", UART_BAUD_CONFIG, baud);
   e220Serial.end();
   delay(50);
   e220Serial.begin(baud, SERIAL_8N1, E220_RX_PIN, E220_TX_PIN);
@@ -153,7 +191,7 @@ void readE220Config() {
   
   // Now wait for AUX to go HIGH (module ready for config commands)
   if (!waitE220Ready(2000)) {
-    Serial.println("[E220] Config mode failed - AUX timeout");
+    dbg.println("[E220] Config mode failed - AUX timeout");
     setE220Mode(0);
     return;
   }
@@ -168,7 +206,7 @@ void readE220Config() {
   // Manual Section 6.1: Read command = C1 + start_addr + length
   // Response = C1 + start_addr + length + data bytes
   uint8_t readCmd[3] = {0xC1, 0x00, 0x06};
-  Serial.printf("[E220] Sending read cmd: %02X %02X %02X\n", readCmd[0], readCmd[1], readCmd[2]);
+  dbg.printf("[E220] Sending read cmd: %02X %02X %02X\n", readCmd[0], readCmd[1], readCmd[2]);
   e220Serial.write(readCmd, 3);
   e220Serial.flush();  // Wait for TX to complete
   
@@ -179,7 +217,7 @@ void readE220Config() {
   }
   
   int avail = e220Serial.available();
-  Serial.printf("[E220] Got %d bytes in response\n", avail);
+  dbg.printf("[E220] Got %d bytes in response\n", avail);
   
   // Response: 0xC1 + START + LEN + ADDH + ADDL + REG0 + REG1 + REG2 + REG3
   if (avail >= 9) {
@@ -214,22 +252,22 @@ void readE220Config() {
     e220_config.lbt = (reg3 >> 4) & 0x01;
     e220_config.wor_cycle = reg3 & 0x07;
     
-    Serial.println("[E220] Read config from module:");
-    Serial.printf("  HDR=0x%02X START=0x%02X LEN=0x%02X\n", hdr, start, len);
-    Serial.printf("  ADDH=0x%02X ADDL=0x%02X\n", addh, addl);
-    Serial.printf("  REG0=0x%02X REG1=0x%02X REG2=0x%02X REG3=0x%02X\n", reg0, reg1, reg2, reg3);
-    Serial.printf("  Channel=%d -> Freq=%.3f MHz\n", reg2, e220_config.freq);
-    Serial.printf("  TX Power=%d dBm\n", e220_config.txpower);
-    Serial.printf("  Air Rate=%d (bits=%d)\n", e220_config.airrate, reg0 & 0x07);
-    Serial.printf("  Baud=%d\n", e220_config.baud);
-    Serial.printf("  TX Mode=%s\n", e220_config.txmode ? "Fixed" : "Transparent");
+    dbg.println("[E220] Read config from module:");
+    dbg.printf("  HDR=0x%02X START=0x%02X LEN=0x%02X\n", hdr, start, len);
+    dbg.printf("  ADDH=0x%02X ADDL=0x%02X\n", addh, addl);
+    dbg.printf("  REG0=0x%02X REG1=0x%02X REG2=0x%02X REG3=0x%02X\n", reg0, reg1, reg2, reg3);
+    dbg.printf("  Channel=%d -> Freq=%.3f MHz\n", reg2, e220_config.freq);
+    dbg.printf("  TX Power=%d dBm\n", e220_config.txpower);
+    dbg.printf("  Air Rate=%d (bits=%d)\n", e220_config.airrate, reg0 & 0x07);
+    dbg.printf("  Baud=%d\n", e220_config.baud);
+    dbg.printf("  TX Mode=%s\n", e220_config.txmode ? "Fixed" : "Transparent");
   } else {
-    Serial.printf("[E220] Read failed, got %d bytes\n", avail);
+    dbg.printf("[E220] Read failed, got %d bytes\n", avail);
     while(e220Serial.available()) {
-      Serial.printf("  byte: 0x%02X\n", e220Serial.read());
+      dbg.printf("  byte: 0x%02X\n", e220Serial.read());
     }
-    Serial.println("[E220] Check: M0->GPIO2, M1->GPIO19, AUX->GPIO4, TX->GPIO22, RX->GPIO21");
-    Serial.printf("[E220] AUX pin state: %s\n", digitalRead(E220_AUX_PIN) ? "HIGH" : "LOW");
+    dbg.println("[E220] Check: M0->GPIO2, M1->GPIO19, AUX->GPIO4, TX->GPIO22, RX->GPIO21");
+    dbg.printf("[E220] AUX pin state: %s\n", digitalRead(E220_AUX_PIN) ? "HIGH" : "LOW");
   }
   
   // Return to NORMAL mode
@@ -253,7 +291,7 @@ void applyE220Config() {
   
   // Wait for AUX to go HIGH per manual Section 5.2
   if (!waitE220Ready(2000)) {
-    Serial.println("[E220] Config mode failed - AUX timeout");
+    dbg.println("[E220] Config mode failed - AUX timeout");
     setE220Mode(0);  // Return to normal mode
     return;
   }
@@ -300,18 +338,18 @@ void applyE220Config() {
   // Write all 8 registers: CMD + START(0x00) + LEN(0x08) + ADDH + ADDL + REG0-REG3 + CRYPT_H + CRYPT_L
   uint8_t packet[11] = {cmd, 0x00, 0x08, addh, addl, reg0, reg1, reg2, reg3, crypt_h, crypt_l};
   
-  Serial.println("[E220] Writing config:");
-  Serial.printf("  CMD=0x%02X (%s)\n", cmd, cmd == 0xC0 ? "SAVE TO FLASH" : "RAM ONLY");
-  Serial.printf("  ADDH=0x%02X ADDL=0x%02X (addr=%s)\n", addh, addl, e220_config.addr);
-  Serial.printf("  REG0=0x%02X: baud=%d parity=%d airrate=%d\n", reg0, e220_config.baud, e220_config.parity, e220_config.airrate);
-  Serial.printf("  REG1=0x%02X: subpkt=%d rssi_noise=%d txpower=%d dBm\n", reg1, e220_config.subpkt, e220_config.rssi_noise, e220_config.txpower);
-  Serial.printf("  REG2=0x%02X: channel=%d freq=%.3f MHz\n", reg2, reg2, 850.125 + reg2);
-  Serial.printf("  REG3=0x%02X: rssi_byte=%d txmode=%s lbt=%d wor=%d\n", reg3, e220_config.rssi_byte, e220_config.txmode ? "FIXED" : "TRANSPARENT", e220_config.lbt, e220_config.wor_cycle);
-  Serial.printf("  CRYPT=0x%02X%02X\n", crypt_h, crypt_l);
+  dbg.println("[E220] Writing config:");
+  dbg.printf("  CMD=0x%02X (%s)\n", cmd, cmd == 0xC0 ? "SAVE TO FLASH" : "RAM ONLY");
+  dbg.printf("  ADDH=0x%02X ADDL=0x%02X (addr=%s)\n", addh, addl, e220_config.addr);
+  dbg.printf("  REG0=0x%02X: baud=%d parity=%d airrate=%d\n", reg0, e220_config.baud, e220_config.parity, e220_config.airrate);
+  dbg.printf("  REG1=0x%02X: subpkt=%d rssi_noise=%d txpower=%d dBm\n", reg1, e220_config.subpkt, e220_config.rssi_noise, e220_config.txpower);
+  dbg.printf("  REG2=0x%02X: channel=%d freq=%.3f MHz\n", reg2, reg2, 850.125 + reg2);
+  dbg.printf("  REG3=0x%02X: rssi_byte=%d txmode=%s lbt=%d wor=%d\n", reg3, e220_config.rssi_byte, e220_config.txmode ? "FIXED" : "TRANSPARENT", e220_config.lbt, e220_config.wor_cycle);
+  dbg.printf("  CRYPT=0x%02X%02X\n", crypt_h, crypt_l);
   
-  Serial.printf("[E220] Sending %d bytes: ", 11);
-  for (int i = 0; i < 11; i++) Serial.printf("%02X ", packet[i]);
-  Serial.println();
+  dbg.printf("[E220] Sending %d bytes: ", 11);
+  for (int i = 0; i < 11; i++) dbg.printf("%02X ", packet[i]);
+  dbg.println();
   
   e220Serial.write(packet, 11);
   e220Serial.flush();
@@ -329,21 +367,21 @@ void applyE220Config() {
   
   int avail = e220Serial.available();
   if (avail > 0) {
-    Serial.printf("[E220] Response (%d bytes):", avail);
+    dbg.printf("[E220] Response (%d bytes):", avail);
     uint8_t first = 0;
     while(e220Serial.available()) {
       uint8_t b = e220Serial.read();
       if (!first) first = b;
-      Serial.printf(" 0x%02X", b);
+      dbg.printf(" 0x%02X", b);
     }
-    Serial.println();
+    dbg.println();
     if (first == 0xC1) {
-      Serial.println("[E220] Config write SUCCESS (C1 acknowledged)");
+      dbg.println("[E220] Config write SUCCESS (C1 acknowledged)");
     } else if (first == 0xFF) {
-      Serial.println("[E220] Config write FAILED (FF FF FF = format error!)");
+      dbg.println("[E220] Config write FAILED (FF FF FF = format error!)");
     }
   } else {
-    Serial.println("[E220] WARNING: No response from module!");
+    dbg.println("[E220] WARNING: No response from module!");
   }
   
   delay(100);
@@ -351,7 +389,7 @@ void applyE220Config() {
   // Return to NORMAL mode (M0=0, M1=0)
   // Per manual Section 5.2.4 note 3: switching FROM config mode causes the module
   // to reset user parameters. AUX goes LOW during this reset. MUST wait for it.
-  Serial.println("[E220] Switching back to normal mode (module will reset params)...");
+  dbg.println("[E220] Switching back to normal mode (module will reset params)...");
   digitalWrite(E220_M0_PIN, LOW);
   digitalWrite(E220_M1_PIN, LOW);
   
@@ -360,13 +398,13 @@ void applyE220Config() {
   
   // Wait for AUX HIGH - module has finished resetting with new params
   if (!waitE220Ready(5000)) {
-    Serial.println("[E220] WARNING: Module not ready after config apply! May need power cycle.");
+    dbg.println("[E220] WARNING: Module not ready after config apply! May need power cycle.");
   }
   
   // Extra settling time after param reset
   delay(200);
   
-  Serial.println("[E220] Config applied, back to normal mode");
+  dbg.println("[E220] Config applied, back to normal mode");
   
   // Read back to verify
   delay(200);
@@ -382,9 +420,9 @@ void setupE220() {
   setE220Mode(0);
   delay(100);  // Wait for module startup (T1 = ~16ms per manual)
   if (waitE220Ready(1000)) {
-    Serial.println("[E220] Init - AUX ready");
+    dbg.println("[E220] Init - AUX ready");
   } else {
-    Serial.println("[E220] Init - WARNING: AUX not ready (module may not be responding)");
+    dbg.println("[E220] Init - WARNING: AUX not ready (module may not be responding)");
   }
 }
 
@@ -417,31 +455,31 @@ void setupWiFi() {
   // Start AP+STA mode
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
-  Serial.print("[WiFi] AP SSID: ");
-  Serial.println(wifi_config.ap_ssid);
-  Serial.print("[WiFi] AP IP: ");
-  Serial.println(WiFi.softAPIP());
+  dbg.print("[WiFi] AP SSID: ");
+  dbg.println(wifi_config.ap_ssid);
+  dbg.print("[WiFi] AP IP: ");
+  dbg.println(WiFi.softAPIP());
 
   // If saved STA credentials exist, attempt connection
   if (strlen(wifi_config.ssid) > 0) {
-    Serial.printf("[WiFi] Connecting to '%s'...\n", wifi_config.ssid);
+    dbg.printf("[WiFi] Connecting to '%s'...\n", wifi_config.ssid);
     WiFi.begin(wifi_config.ssid, wifi_config.password);
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
       delay(250);
-      Serial.print(".");
+      dbg.print(".");
     }
-    Serial.println();
+    dbg.println();
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.print("[WiFi] STA connected, IP: ");
-      Serial.println(WiFi.localIP());
+      dbg.print("[WiFi] STA connected, IP: ");
+      dbg.println(WiFi.localIP());
     } else {
-      Serial.println("[WiFi] STA connection failed, AP-only mode");
+      dbg.println("[WiFi] STA connection failed, AP-only mode");
       WiFi.mode(WIFI_AP);
       WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
     }
   } else {
-    Serial.println("[WiFi] No saved STA credentials, AP-only mode");
+    dbg.println("[WiFi] No saved STA credentials, AP-only mode");
     WiFi.mode(WIFI_AP);
     WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
   }
@@ -449,17 +487,17 @@ void setupWiFi() {
 
 void setupFS() {
   if (!LittleFS.begin(true)) {
-    Serial.println("[FS] Mount failed");
+    dbg.println("[FS] Mount failed");
     return;
   }
-  Serial.println("[FS] Ready");
+  dbg.println("[FS] Ready");
   
   // Debug: list files
   File root = LittleFS.open("/");
   File file = root.openNextFile();
   while(file) {
-    Serial.print("[FS] Found: ");
-    Serial.println(file.name());
+    dbg.print("[FS] Found: ");
+    dbg.println(file.name());
     file = root.openNextFile();
   }
 }
@@ -467,7 +505,7 @@ void setupFS() {
 void setupWebRoutes() {
   // Serve index.html (with gzip support)
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    Serial.println("[Web] Request for /");
+    dbg.println("[Web] Request for /");
     
     // Check if client accepts gzip
     bool acceptGzip = false;
@@ -480,7 +518,7 @@ void setupWebRoutes() {
     
     // Try to serve compressed version first
     if (acceptGzip && LittleFS.exists("/index.html.gz")) {
-      Serial.println("[Web] Serving compressed HTML");
+      dbg.println("[Web] Serving compressed HTML");
       AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/index.html.gz", "text/html");
       response->addHeader("Content-Encoding", "gzip");
       response->addHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
@@ -488,7 +526,7 @@ void setupWebRoutes() {
       response->addHeader("Expires", "0");
       request->send(response);
     } else if (LittleFS.exists("/index.html")) {
-      Serial.println("[Web] Serving uncompressed HTML");
+      dbg.println("[Web] Serving uncompressed HTML");
       AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/index.html", "text/html");
       response->addHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
       response->addHeader("Pragma", "no-cache");
@@ -496,7 +534,7 @@ void setupWebRoutes() {
       request->send(response);
     } else {
       request->send(404, "text/plain", "index.html not found");
-      Serial.println("[Web] HTML not found!");
+      dbg.println("[Web] HTML not found!");
     }
   });
 
@@ -548,7 +586,7 @@ void setupWebRoutes() {
     }
     
     request->send(200, "application/json", "{\"status\":\"ok\"}");
-    Serial.printf("[TX] Queued (%d bytes)\n", msg.length());
+    dbg.printf("[TX] Queued (%d bytes)\n", msg.length());
   }, NULL,
   [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
     if (index == 0) {
@@ -613,12 +651,12 @@ void setupWebRoutes() {
     if (doc.containsKey("crypt_l")) e220_config.crypt_l = doc["crypt_l"];
     if (doc.containsKey("savetype")) e220_config.savetype = doc["savetype"];
     
-    Serial.println("[CONFIG] Updated parameters:");
-    Serial.printf("  freq=%.3f txpower=%d baud=%d\n", e220_config.freq, e220_config.txpower, e220_config.baud);
-    Serial.printf("  addr=%s dest=%s\n", e220_config.addr, e220_config.dest);
-    Serial.printf("  airrate=%d subpkt=%d parity=%d txmode=%d\n", e220_config.airrate, e220_config.subpkt, e220_config.parity, e220_config.txmode);
-    Serial.printf("  rssi_noise=%d rssi_byte=%d lbt=%d wor=%d\n", e220_config.rssi_noise, e220_config.rssi_byte, e220_config.lbt, e220_config.wor_cycle);
-    Serial.printf("  crypt=0x%02X%02X savetype=%d\n", e220_config.crypt_h, e220_config.crypt_l, e220_config.savetype);
+    dbg.println("[CONFIG] Updated parameters:");
+    dbg.printf("  freq=%.3f txpower=%d baud=%d\n", e220_config.freq, e220_config.txpower, e220_config.baud);
+    dbg.printf("  addr=%s dest=%s\n", e220_config.addr, e220_config.dest);
+    dbg.printf("  airrate=%d subpkt=%d parity=%d txmode=%d\n", e220_config.airrate, e220_config.subpkt, e220_config.parity, e220_config.txmode);
+    dbg.printf("  rssi_noise=%d rssi_byte=%d lbt=%d wor=%d\n", e220_config.rssi_noise, e220_config.rssi_byte, e220_config.lbt, e220_config.wor_cycle);
+    dbg.printf("  crypt=0x%02X%02X savetype=%d\n", e220_config.crypt_h, e220_config.crypt_l, e220_config.savetype);
     
     // Always apply config to the E220 module
     applyE220Config();
@@ -626,10 +664,29 @@ void setupWebRoutes() {
     request->send(200, "application/json", "{\"status\":\"ok\"}");
   });
 
+  // Debug log API - returns new serial output since last poll
+  server.on("/api/debug", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String out;
+    out.reserve(512);
+    while (debugLogReadPos != debugLogHead) {
+      char c = debugLogBuf[debugLogReadPos];
+      out += c;
+      debugLogReadPos = (debugLogReadPos + 1) % DEBUG_LOG_SIZE;
+      if (out.length() > 2048) break;  // cap per response
+    }
+    request->send(200, "text/plain", out);
+  });
+
+  // Debug log clear
+  server.on("/api/debug/clear", HTTP_POST, [](AsyncWebServerRequest *request) {
+    debugLogReadPos = debugLogHead;
+    request->send(200, "text/plain", "ok");
+  });
+
   // Reboot API
   server.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest *request) {
     request->send(200, "application/json", "{\"status\":\"rebooting\"}");
-    Serial.println("[SYS] Reboot requested via web");
+    dbg.println("[SYS] Reboot requested via web");
     delay(500);
     ESP.restart();
   });
@@ -699,10 +756,10 @@ void setupWebRoutes() {
       delay(250);
     }
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.printf("[WiFi] Connected to %s, IP: %s\n", ssid, WiFi.localIP().toString().c_str());
+      dbg.printf("[WiFi] Connected to %s, IP: %s\n", ssid, WiFi.localIP().toString().c_str());
       request->send(200, "application/json", "{\"status\":\"connected\",\"ip\":\"" + WiFi.localIP().toString() + "\"}");
     } else {
-      Serial.printf("[WiFi] Failed to connect to %s\n", ssid);
+      dbg.printf("[WiFi] Failed to connect to %s\n", ssid);
       request->send(200, "application/json", "{\"status\":\"failed\"}");
     }
   });
@@ -716,7 +773,7 @@ void setupWebRoutes() {
     wifi_config.password[0] = '\0';
     WiFi.mode(WIFI_AP);
     WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
-    Serial.println("[WiFi] Disconnected STA, cleared credentials");
+    dbg.println("[WiFi] Disconnected STA, cleared credentials");
     request->send(200, "application/json", "{\"status\":\"disconnected\"}");
   });
 
@@ -738,50 +795,89 @@ void setupWebRoutes() {
       preferences.putString("ap_pass", pass);
       strlcpy(wifi_config.ap_password, pass, sizeof(wifi_config.ap_password));
     }
-    Serial.printf("[WiFi] AP settings saved: SSID=%s (reboot required)\n", wifi_config.ap_ssid);
+    dbg.printf("[WiFi] AP settings saved: SSID=%s (reboot required)\n", wifi_config.ap_ssid);
     request->send(200, "application/json", "{\"status\":\"saved\",\"note\":\"Reboot to apply\"}");
   });
 
   server.begin();
-  Serial.println("[Web] Server on 192.168.4.1");
+  dbg.println("[Web] Server on 192.168.4.1");
 }
 
 // RX buffer for reassembling large incoming messages
-static String rxBuffer = "";
+static uint8_t rxBuf[256];
+static int rxLen = 0;
 static unsigned long lastRxTime = 0;
 // If no new data for this many ms, flush whatever we have as a complete message
 #define RX_FLUSH_TIMEOUT 2000
+static int lastRssi = 0;  // last RSSI value in dBm
+
+// Process a complete received packet (strip RSSI byte if enabled)
+void processRxPacket() {
+  if (rxLen == 0) return;
+  
+  int msgLen = rxLen;
+  int rssiRaw = -1;
+  
+  // If RSSI byte is enabled, last byte is RSSI value
+  if (e220_config.rssi_byte && msgLen > 1) {
+    rssiRaw = rxBuf[msgLen - 1];
+    msgLen--;  // strip RSSI byte from message
+    lastRssi = -(256 - rssiRaw);  // convert to dBm (E220: RSSI = -(256-val) dBm)
+    dbg.printf("[RSSI] raw=0x%02X -> %d dBm\n", rssiRaw, lastRssi);
+  } else if (e220_config.rssi_byte && msgLen == 1) {
+    // Single byte with RSSI enabled = just RSSI, no message content
+    rssiRaw = rxBuf[0];
+    lastRssi = -(256 - rssiRaw);
+    dbg.printf("[RSSI] raw=0x%02X -> %d dBm (standalone)\n", rssiRaw, lastRssi);
+    rxLen = 0;
+    return;
+  }
+  
+  // Build message string, stripping trailing newlines/whitespace
+  String msg = "";
+  for (int i = 0; i < msgLen; i++) {
+    char c = (char)rxBuf[i];
+    if (c >= 0x20 || c == '\t') {  // printable chars + tab only
+      msg += c;
+    }
+  }
+  msg.trim();
+  
+  if (msg.length() > 0 && chatIndex < 100) {
+    String display = "[RX] " + msg;
+    if (e220_config.rssi_byte && rssiRaw >= 0) {
+      display += " [RSSI:" + String(lastRssi) + "dBm]";
+    }
+    chatHistory[chatIndex] = display;
+    chatIndex++;
+    dbg.printf("[RX] (%d bytes) %s", msg.length(), msg.c_str());
+    if (rssiRaw >= 0) {
+      dbg.printf(" [RSSI:%d dBm]", lastRssi);
+    }
+    dbg.println();
+  }
+  
+  rxLen = 0;
+}
 
 void handleE220Serial() {
   while (e220Serial.available()) {
-    char c = (char)e220Serial.read();
+    uint8_t b = e220Serial.read();
     lastRxTime = millis();
     
-    if (c == '\n') {
+    if ((char)b == '\n') {
       // Newline = end of message
-      rxBuffer.trim();
-      if (rxBuffer.length() > 0 && chatIndex < 100) {
-        chatHistory[chatIndex] = "[RX] " + rxBuffer;
-        chatIndex++;
-        Serial.printf("[RX] (%d bytes) ", rxBuffer.length());
-        Serial.println(rxBuffer);
-      }
-      rxBuffer = "";
+      processRxPacket();
     } else {
-      rxBuffer += c;
+      if (rxLen < (int)sizeof(rxBuf) - 1) {
+        rxBuf[rxLen++] = b;
+      }
     }
   }
   
   // Flush partial buffer after timeout (in case sender didn't send newline)
-  if (rxBuffer.length() > 0 && (millis() - lastRxTime) > RX_FLUSH_TIMEOUT) {
-    rxBuffer.trim();
-    if (rxBuffer.length() > 0 && chatIndex < 100) {
-      chatHistory[chatIndex] = "[RX] " + rxBuffer;
-      chatIndex++;
-      Serial.printf("[RX] (%d bytes, timeout flush) ", rxBuffer.length());
-      Serial.println(rxBuffer);
-    }
-    rxBuffer = "";
+  if (rxLen > 0 && (millis() - lastRxTime) > RX_FLUSH_TIMEOUT) {
+    processRxPacket();
   }
 }
 
@@ -794,33 +890,33 @@ void handleUSBSerial() {
     
     // Slash commands for config/admin, everything else is a message
     if (input == "/config") {
-      Serial.println("[CONFIG] Current settings:");
-      Serial.printf("  freq=%.3f MHz (CH=%d)\n", e220_config.freq, (int)(e220_config.freq - 850.125));
-      Serial.printf("  txpower=%d dBm\n", e220_config.txpower);
-      Serial.printf("  baud=%d\n", e220_config.baud);
-      Serial.printf("  addr=%s  dest=%s\n", e220_config.addr, e220_config.dest);
-      Serial.printf("  airrate=%d  subpkt=%d  parity=%d\n", e220_config.airrate, e220_config.subpkt, e220_config.parity);
-      Serial.printf("  txmode=%s\n", e220_config.txmode ? "FIXED" : "TRANSPARENT");
-      Serial.printf("  rssi_noise=%d  rssi_byte=%d\n", e220_config.rssi_noise, e220_config.rssi_byte);
-      Serial.printf("  lbt=%d  wor_cycle=%d\n", e220_config.lbt, e220_config.wor_cycle);
-      Serial.printf("  crypt=0x%02X%02X  savetype=%d\n", e220_config.crypt_h, e220_config.crypt_l, e220_config.savetype);
+      dbg.println("[CONFIG] Current settings:");
+      dbg.printf("  freq=%.3f MHz (CH=%d)\n", e220_config.freq, (int)(e220_config.freq - 850.125));
+      dbg.printf("  txpower=%d dBm\n", e220_config.txpower);
+      dbg.printf("  baud=%d\n", e220_config.baud);
+      dbg.printf("  addr=%s  dest=%s\n", e220_config.addr, e220_config.dest);
+      dbg.printf("  airrate=%d  subpkt=%d  parity=%d\n", e220_config.airrate, e220_config.subpkt, e220_config.parity);
+      dbg.printf("  txmode=%s\n", e220_config.txmode ? "FIXED" : "TRANSPARENT");
+      dbg.printf("  rssi_noise=%d  rssi_byte=%d\n", e220_config.rssi_noise, e220_config.rssi_byte);
+      dbg.printf("  lbt=%d  wor_cycle=%d\n", e220_config.lbt, e220_config.wor_cycle);
+      dbg.printf("  crypt=0x%02X%02X  savetype=%d\n", e220_config.crypt_h, e220_config.crypt_l, e220_config.savetype);
     }
     else if (input == "/read") {
-      Serial.println("[E220] Reading module registers...");
+      dbg.println("[E220] Reading module registers...");
       readE220Config();
     }
     else if (input == "/history") {
-      Serial.printf("[HISTORY] %d messages:\n", chatIndex);
+      dbg.printf("[HISTORY] %d messages:\n", chatIndex);
       for (int i = 0; i < chatIndex; i++) {
-        Serial.printf("  %d: %s\n", i, chatHistory[i].c_str());
+        dbg.printf("  %d: %s\n", i, chatHistory[i].c_str());
       }
     }
     else if (input == "/clear") {
       chatIndex = 0;
-      Serial.println("[OK] History cleared");
+      dbg.println("[OK] History cleared");
     }
     else if (input == "/factory") {
-      Serial.println("[E220] Restoring factory defaults (900MHz: addr=0, ch=80, 9600 8N1, air 2.4k, 21dBm)...");
+      dbg.println("[E220] Restoring factory defaults (900MHz: addr=0, ch=80, 9600 8N1, air 2.4k, 21dBm)...");
       e220_config.freq = 930.125;
       e220_config.txpower = 21;
       e220_config.baud = 9600;
@@ -842,14 +938,14 @@ void handleUSBSerial() {
       readE220Config();
     }
     else if (input == "/help") {
-      Serial.println("Type anything to send it via E220.");
-      Serial.println("Slash commands:");
-      Serial.println("  /config   - Show E220 config");
-      Serial.println("  /read     - Read module registers");
-      Serial.println("  /factory  - Restore factory defaults");
-      Serial.println("  /history  - Show chat history");
-      Serial.println("  /clear    - Clear history");
-      Serial.println("  /help     - This help");
+      dbg.println("Type anything to send it via E220.");
+      dbg.println("Slash commands:");
+      dbg.println("  /config   - Show E220 config");
+      dbg.println("  /read     - Read module registers");
+      dbg.println("  /factory  - Restore factory defaults");
+      dbg.println("  /history  - Show chat history");
+      dbg.println("  /clear    - Clear history");
+      dbg.println("  /help     - This help");
     }
     else {
       // Everything else is a message - send it (chunked for large messages)
@@ -876,7 +972,7 @@ void handleUSBSerial() {
         chatHistory[chatIndex] = "[TX] " + input;
         chatIndex++;
       }
-      Serial.printf("[TX] (%d bytes) %s\n", inputLen, input.c_str());
+      dbg.printf("[TX] (%d bytes) %s\n", inputLen, input.c_str());
     }
   }
 }
@@ -884,7 +980,7 @@ void handleUSBSerial() {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("\n\n[BOOT] E220 Chat + Config");
+  dbg.println("\n\n[BOOT] E220 Chat + Config");
   
   setupFS();
   setupE220();
@@ -892,10 +988,10 @@ void setup() {
   setupWebRoutes();
   
   // Read current E220 config on boot
-  Serial.println("[BOOT] Reading E220 module config...");
+  dbg.println("[BOOT] Reading E220 module config...");
   readE220Config();
   
-  Serial.println("[BOOT] Ready!");
+  dbg.println("[BOOT] Ready!");
 }
 
 // Drain TX queue from loop() context where blocking is safe
@@ -905,7 +1001,7 @@ void handleTxQueue() {
   const int CHUNK_SIZE = 190;
   int msgLen = txQueue.length();
   
-  Serial.printf("[TX] Sending (%d bytes)...\n", msgLen);
+  dbg.printf("[TX] Sending (%d bytes)...\n", msgLen);
   
   if (msgLen <= CHUNK_SIZE) {
     e220Serial.print(txQueue);
@@ -923,7 +1019,7 @@ void handleTxQueue() {
   }
   e220Serial.flush();
   
-  Serial.printf("[TX] Sent %d bytes\n", msgLen);
+  dbg.printf("[TX] Sent %d bytes\n", msgLen);
   txQueue = "";
   txPending = false;
 }

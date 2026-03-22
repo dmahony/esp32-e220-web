@@ -854,7 +854,7 @@
       const msg = input.value.trim();
       if (!msg) return;
 
-      addDebugLine('[TX] ' + msg);
+      // TX debug info comes from firmware via /api/debug
 
       fetch('/api/send', {
         method: 'POST',
@@ -1134,29 +1134,16 @@
         }
       });
 
-    // Debug terminal output logging
+    // Debug terminal output - shows exact serial/terminal output
     let debugPaused = false;
-    let debugLogBuffer = [];
-    const MAX_LINES = 500;
+    const MAX_CHARS = 32000;
     const debugLog = document.getElementById('debug-log');
-
-    function addDebugLine(text) {
-      if (debugPaused) return;
-      debugLogBuffer.push(text);
-      if (debugLogBuffer.length > MAX_LINES) {
-        debugLogBuffer.shift();
-      }
-      updateDebugDisplay();
-    }
-
-    function updateDebugDisplay() {
-      debugLog.textContent = debugLogBuffer.join('\n');
-      debugLog.parentElement.scrollTop = debugLog.parentElement.scrollHeight;
-    }
+    let debugText = '';
 
     function clearDebugLog() {
-      debugLogBuffer = [];
-      updateDebugDisplay();
+      debugText = '';
+      debugLog.textContent = '';
+      fetch('/api/debug/clear', {method:'POST'}).catch(()=>{});
     }
 
     function toggleDebugPause() {
@@ -1166,16 +1153,22 @@
       btn.style.background = debugPaused ? '#10b981' : '#3b82f6';
     }
 
-    // Polling for E220 messages
+    // Poll for new serial output
     setInterval(() => {
-      fetch('/api/recv')
-        .then(r => r.json())
-        .then(data => {
-          if (data.message) {
-            addDebugLine('[RX] ' + data.message);
+      if (debugPaused) return;
+      fetch('/api/debug')
+        .then(r => r.text())
+        .then(text => {
+          if (text.length > 0) {
+            debugText += text;
+            if (debugText.length > MAX_CHARS) {
+              debugText = debugText.slice(-MAX_CHARS);
+            }
+            debugLog.textContent = debugText;
+            debugLog.scrollTop = debugLog.scrollHeight;
           }
         })
-        .catch(err => addDebugLine('[ERR] ' + err.message));
+        .catch(() => {});
     }, 500);
   </script>
 </body>
