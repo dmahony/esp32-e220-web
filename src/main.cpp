@@ -805,58 +805,110 @@ void setupWebRoutes() {
 }
 
 // RX buffer for reassembling large incoming messages
-static uint8_t rxBuf[256];
+static uint8_t rxBuf[512];
 static int rxLen = 0;
 static unsigned long lastRxTime = 0;
 // If no new data for this many ms, flush whatever we have as a complete message
 #define RX_FLUSH_TIMEOUT 2000
 static int lastRssi = 0;  // last RSSI value in dBm
 
-// Process a complete received packet (strip RSSI byte if enabled)
+// Get sub-packet size in bytes from config value
+int getSubPacketSize() {
+  switch (e220_config.subpkt) {
+    case 0: return 200;
+    case 1: return 128;
+    case 2: return 64;
+    case 3: return 32;
+    default: return 200;
+  }
+}
+
+// Process a complete received packet (strip RSSI bytes if enabled)
+// When RSSI byte is enabled, the E220 appends 1 RSSI byte after EACH sub-packet,
+// not just at the end. So a 210-byte message with 200B sub-packets arrives as:
+//   [200 data bytes] [RSSI] [10 data bytes] [RSSI]
 void processRxPacket() {
   if (rxLen == 0) return;
   
-  int msgLen = rxLen;
   int rssiRaw = -1;
   
-  // If RSSI byte is enabled, last byte is RSSI value
-  if (e220_config.rssi_byte && msgLen > 1) {
-    rssiRaw = rxBuf[msgLen - 1];
-    msgLen--;  // strip RSSI byte from message
-    lastRssi = -(256 - rssiRaw);  // convert to dBm (E220: RSSI = -(256-val) dBm)
-    dbg.printf("[RSSI] raw=0x%02X -> %d dBm\n", rssiRaw, lastRssi);
-  } else if (e220_config.rssi_byte && msgLen == 1) {
-    // Single byte with RSSI enabled = just RSSI, no message content
-    rssiRaw = rxBuf[0];
-    lastRssi = -(256 - rssiRaw);
-    dbg.printf("[RSSI] raw=0x%02X -> %d dBm (standalone)\n", rssiRaw, lastRssi);
-    rxLen = 0;
-    return;
-  }
-  
-  // Build message string, keeping all bytes except control chars (0x00-0x1F except tab)
-  // This preserves UTF-8 multi-byte sequences (high bytes 0x80-0xFF)
-  String msg = "";
-  for (int i = 0; i < msgLen; i++) {
-    uint8_t b = rxBuf[i];
-    if (b >= 0x20 || b == '\t') {  // printable ASCII, UTF-8 high bytes (0x80+), and tab
-      msg += (char)b;
+  if (e220_config.rssi_byte) {
+    // Strip RSSI bytes embedded at every sub-packet boundary
+    int subPktSize = getSubPacketSize();
+    uint8_t cleaned[512];
+    int cleanLen = 0;
+    int dataCount = 0;  // bytes of actual data seen since last RSSI strip
+    
+    dbg.printf("[RSSI] Stripping from %d raw bytes (subpkt=%d)\n", rxLen, subPktSize);
+    
+    for (int i = 0; i < rxLen; i++) {
+      dataCount++;
+      if (dataCount == subPktSize + 1) {
+        // This byte is an RSSI byte (appended after subPktSize data bytes)
+        rssiRaw = rxBuf[i];
+        lastRssi = -(256 - rssiRaw);
+        dbg.printf("[RSSI] stripped at pos %d: raw=0x%02X -> %d dBm\n", i, rssiRaw, lastRssi);
+        dataCount = 0;  // reset counter for next sub-packet
+      } else {
+        if (cleanLen < (int)sizeof(cleaned)) {
+          cleaned[cleanLen++] = rxBuf[i];
+        }
+      }
     }
-  }
-  msg.trim();
-  
-  if (msg.length() > 0 && chatIndex < 100) {
-    String display = "[RX] " + msg;
-    if (e220_config.rssi_byte && rssiRaw >= 0) {
-      display += " [RSSI:" + String(lastRssi) + "dBm]";
+    
+    // Check if the very last byte is a trailing RSSI (partial sub-packet)
+    // If we have remaining data and the last byte looks like RSSI
+    if (dataCount > 1) {
+      // Last sub-packet was partial; last byte is RSSI
+      rssiRaw = cleaned[cleanLen - 1];
+      cleanLen--;
+      lastRssi = -(256 - rssiRaw);
+      dbg.printf("[RSSI] trailing: raw=0x%02X -> %d dBm\n", rssiRaw, lastRssi);
+    } else if (dataCount == 1 && cleanLen > 0) {
+      // The last byte we added was actually an orphan RSSI
+      rssiRaw = cleaned[cleanLen - 1];
+      cleanLen--;
+      lastRssi = -(256 - rssiRaw);
+      dbg.printf("[RSSI] final: raw=0x%02X -> %d dBm\n", rssiRaw, lastRssi);
     }
-    chatHistory[chatIndex] = display;
-    chatIndex++;
-    dbg.printf("[RX] (%d bytes) %s", msg.length(), msg.c_str());
-    if (rssiRaw >= 0) {
-      dbg.printf(" [RSSI:%d dBm]", lastRssi);
+    
+    // Build message from cleaned buffer
+    String msg = "";
+    for (int i = 0; i < cleanLen; i++) {
+      uint8_t b = cleaned[i];
+      if (b >= 0x20 || b == '\t') {
+        msg += (char)b;
+      }
     }
-    dbg.println();
+    msg.trim();
+    
+    if (msg.length() > 0 && chatIndex < 100) {
+      String display = "[RX] " + msg;
+      if (rssiRaw >= 0) {
+        display += " [RSSI:" + String(lastRssi) + "dBm]";
+      }
+      chatHistory[chatIndex] = display;
+      chatIndex++;
+      dbg.printf("[RX] (%d bytes) %s", msg.length(), msg.c_str());
+      if (rssiRaw >= 0) dbg.printf(" [RSSI:%d dBm]", lastRssi);
+      dbg.println();
+    }
+  } else {
+    // No RSSI stripping needed
+    String msg = "";
+    for (int i = 0; i < rxLen; i++) {
+      uint8_t b = rxBuf[i];
+      if (b >= 0x20 || b == '\t') {
+        msg += (char)b;
+      }
+    }
+    msg.trim();
+    
+    if (msg.length() > 0 && chatIndex < 100) {
+      chatHistory[chatIndex] = "[RX] " + msg;
+      chatIndex++;
+      dbg.printf("[RX] (%d bytes) %s\n", msg.length(), msg.c_str());
+    }
   }
   
   rxLen = 0;
