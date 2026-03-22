@@ -540,7 +540,7 @@ void setupWebRoutes() {
 
   // Chat history API - uses ArduinoJson for proper escaping
   server.on("/api/chat", HTTP_GET, [](AsyncWebServerRequest *request) {
-    DynamicJsonDocument doc(8192);
+    DynamicJsonDocument doc(16384);
     JsonArray history = doc.createNestedArray("history");
     for (int i = 0; i < chatIndex; i++) {
       history.add(chatHistory[i]);
@@ -873,7 +873,8 @@ void processRxPacket() {
     }
     
     // Build message from cleaned buffer
-    String msg = "";
+    String msg;
+    msg.reserve(cleanLen + 1);
     for (int i = 0; i < cleanLen; i++) {
       uint8_t b = cleaned[i];
       if (b >= 0x20 || b == '\t') {
@@ -883,19 +884,22 @@ void processRxPacket() {
     msg.trim();
     
     if (msg.length() > 0 && chatIndex < 100) {
-      String display = "[RX] " + msg;
+      String display;
+      display.reserve(msg.length() + 40);
+      display = "[RX] " + msg;
       if (rssiRaw >= 0) {
         display += " [RSSI:" + String(lastRssi) + "dBm]";
       }
       chatHistory[chatIndex] = display;
       chatIndex++;
-      dbg.printf("[RX] (%d bytes) %s", msg.length(), msg.c_str());
+      dbg.printf("[RX] (%d bytes)", msg.length());
       if (rssiRaw >= 0) dbg.printf(" [RSSI:%d dBm]", lastRssi);
       dbg.println();
     }
   } else {
     // No RSSI stripping needed
-    String msg = "";
+    String msg;
+    msg.reserve(rxLen + 1);
     for (int i = 0; i < rxLen; i++) {
       uint8_t b = rxBuf[i];
       if (b >= 0x20 || b == '\t') {
@@ -907,7 +911,7 @@ void processRxPacket() {
     if (msg.length() > 0 && chatIndex < 100) {
       chatHistory[chatIndex] = "[RX] " + msg;
       chatIndex++;
-      dbg.printf("[RX] (%d bytes) %s\n", msg.length(), msg.c_str());
+      dbg.printf("[RX] (%d bytes)\n", msg.length());
     }
   }
   
