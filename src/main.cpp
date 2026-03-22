@@ -12,7 +12,7 @@
 #define E220_M1_PIN   19
 #define E220_AUX_PIN  4
 #define UART_BAUD_CONFIG  9600    // E220 config mode always uses 9600
-#define UART_BAUD_NORMAL  115200  // Normal mode baud rate
+#define UART_BAUD_NORMAL  9600    // Normal mode baud rate (match config mode for simplicity)
 
 AsyncWebServer server(80);
 Preferences preferences;
@@ -47,7 +47,7 @@ struct {
   int crypt_h;       // REG 06h: encryption key high byte (write-only)
   int crypt_l;       // REG 07h: encryption key low byte (write-only)
   int savetype;      // 0=C2 (RAM only), 1=C0 (save to flash)
-} e220_config = {930.125, 21, 115200, "0x0000", "0xFFFF", 2, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0};
+} e220_config = {930.125, 21, 9600, "0x0000", "0xFFFF", 2, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0};
 
 void setE220Mode(uint8_t mode) {
   if (mode == 1) {
@@ -132,32 +132,52 @@ uint8_t txpowerToReg(int dbm) {
 }
 
 void readE220Config() {
-  // Enter CONFIG mode (M0=1, M1=1)
+  // Ensure serial is at 9600 for config mode (manual: config mode ONLY supports 9600 8N1)
+  e220Serial.end();
+  delay(50);
+  e220Serial.begin(9600, SERIAL_8N1, E220_RX_PIN, E220_TX_PIN);
+  delay(50);
+  
+  // Enter CONFIG mode (M0=1, M1=1) per manual Section 5.1.3
   digitalWrite(E220_M0_PIN, HIGH);
   digitalWrite(E220_M1_PIN, HIGH);
   
-  // Wait for AUX to go HIGH (module ready for config commands)
-  if (!waitE220Ready(1000)) {
+  // Per manual Section 5.2.4: mode switch takes 9-11ms, AUX goes LOW during switch
+  // Wait for AUX to go LOW first (indicates switch has started)
+  delay(15);  // Ensure mode switch has begun
+  
+  // Now wait for AUX to go HIGH (module ready for config commands)
+  if (!waitE220Ready(2000)) {
     Serial.println("[E220] Config mode failed - AUX timeout");
+    setE220Mode(0);
     return;
   }
+  
+  // Extra settling delay after AUX goes HIGH
+  delay(50);
   
   // Flush any stale data
   while(e220Serial.available()) e220Serial.read();
   
-  // Read registers 0x00-0x05: CMD(0xC1) + START(0x00) + LEN(0x06)
+  // Read registers 0x00-0x07: CMD(0xC1) + START(0x00) + LEN(0x08)
+  // Manual Section 6.1: Read command = C1 + start_addr + length
+  // Response = C1 + start_addr + length + data bytes
   uint8_t readCmd[3] = {0xC1, 0x00, 0x06};
+  Serial.printf("[E220] Sending read cmd: %02X %02X %02X\n", readCmd[0], readCmd[1], readCmd[2]);
   e220Serial.write(readCmd, 3);
-  e220Serial.flush();
+  e220Serial.flush();  // Wait for TX to complete
   
-  // Wait for response with AUX monitoring
-  uint32_t timeout = millis() + 500;
+  // Wait for response: 3 header bytes + 6 data bytes = 9 bytes total
+  uint32_t timeout = millis() + 1000;
   while (e220Serial.available() < 9 && millis() < timeout) {
     delay(10);
   }
   
+  int avail = e220Serial.available();
+  Serial.printf("[E220] Got %d bytes in response\n", avail);
+  
   // Response: 0xC1 + START + LEN + ADDH + ADDL + REG0 + REG1 + REG2 + REG3
-  if (e220Serial.available() >= 9) {
+  if (avail >= 9) {
     uint8_t hdr = e220Serial.read(); // 0xC1
     uint8_t start = e220Serial.read(); // 0x00
     uint8_t len = e220Serial.read(); // 0x06
@@ -169,6 +189,7 @@ void readE220Config() {
     uint8_t reg3 = e220Serial.read();
     
     Serial.println("[E220] Read config from module:");
+    Serial.printf("  HDR=0x%02X START=0x%02X LEN=0x%02X\n", hdr, start, len);
     Serial.printf("  ADDH=0x%02X ADDL=0x%02X\n", addh, addl);
     Serial.printf("  REG0=0x%02X REG1=0x%02X REG2=0x%02X REG3=0x%02X\n", reg0, reg1, reg2, reg3);
     Serial.printf("  Channel=%d -> Freq=%.3f MHz\n", reg2, 850.125 + reg2);
@@ -177,27 +198,42 @@ void readE220Config() {
     Serial.printf("  Baud bits=%d\n", (reg0 >> 5) & 0x07);
     Serial.printf("  TX Mode=%s\n", (reg3 & 0x40) ? "Fixed" : "Transparent");
   } else {
-    Serial.printf("[E220] Read failed, got %d bytes\n", e220Serial.available());
+    Serial.printf("[E220] Read failed, got %d bytes\n", avail);
     while(e220Serial.available()) {
-      Serial.printf("  0x%02X\n", e220Serial.read());
+      Serial.printf("  byte: 0x%02X\n", e220Serial.read());
     }
+    Serial.println("[E220] Check: M0->GPIO2, M1->GPIO19, AUX->GPIO4, TX->GPIO22, RX->GPIO21");
+    Serial.printf("[E220] AUX pin state: %s\n", digitalRead(E220_AUX_PIN) ? "HIGH" : "LOW");
   }
   
   // Return to NORMAL mode
   setE220Mode(0);
+  delay(50);
 }
 
 void applyE220Config() {
+  // Ensure serial is at 9600 for config mode (manual: config mode ONLY supports 9600 8N1)
+  e220Serial.end();
+  delay(50);
+  e220Serial.begin(9600, SERIAL_8N1, E220_RX_PIN, E220_TX_PIN);
+  delay(50);
+  
   // Enter CONFIG mode (M0=1, M1=1) - serial port MUST be 9600 8N1 in this mode
   digitalWrite(E220_M0_PIN, HIGH);
   digitalWrite(E220_M1_PIN, HIGH);
   
+  // Per manual Section 5.2.4: mode switch takes 9-11ms
+  delay(15);
+  
   // Wait for AUX to go HIGH per manual Section 5.2
-  if (!waitE220Ready(1000)) {
+  if (!waitE220Ready(2000)) {
     Serial.println("[E220] Config mode failed - AUX timeout");
     setE220Mode(0);  // Return to normal mode
     return;
   }
+  
+  // Extra settling delay
+  delay(50);
   
   // Flush any stale data
   while(e220Serial.available()) e220Serial.read();
