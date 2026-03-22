@@ -299,10 +299,19 @@ void setupWiFi() {
   strlcpy(wifi_config.password, savedPass.c_str(), sizeof(wifi_config.password));
 
   // Load saved AP settings with defaults
-  int randomNum = random(100, 1000);
-  String defaultAP = "E220-Chat-" + String(randomNum);
-  String apSSID = preferences.isKey("ap_ssid") ? preferences.getString("ap_ssid", defaultAP) : defaultAP;
-  String apPass = preferences.isKey("ap_pass") ? preferences.getString("ap_pass", "password123") : "password123";
+  // Generate random AP name only once (first boot), then persist it
+  String apSSID, apPass;
+  if (preferences.isKey("ap_ssid")) {
+    apSSID = preferences.getString("ap_ssid");
+    apPass = preferences.getString("ap_pass", "password123");
+  } else {
+    // First boot: generate random AP name and save it
+    int randomNum = random(100, 1000);
+    apSSID = "E220-Chat-" + String(randomNum);
+    apPass = "password123";
+    preferences.putString("ap_ssid", apSSID);
+    preferences.putString("ap_pass", apPass);
+  }
   strlcpy(wifi_config.ap_ssid, apSSID.c_str(), sizeof(wifi_config.ap_ssid));
   strlcpy(wifi_config.ap_password, apPass.c_str(), sizeof(wifi_config.ap_password));
 
