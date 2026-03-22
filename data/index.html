@@ -579,6 +579,7 @@
       <button class="tab-btn active" onclick="switchTab('chat')">Chat</button>
       <button class="tab-btn" onclick="switchTab('config')">Config</button>
       <button class="tab-btn" onclick="switchTab('wifi')">WiFi</button>
+      <button class="tab-btn" onclick="switchTab('debug')">Debug</button>
     </div>
 
     <div class="content">
@@ -828,6 +829,15 @@
           <div id="wifi-msg" class="wifi-msg"></div>
         </div>
       </div>
+
+      <!-- DEBUG TAB -->
+      <div id="debug" class="tab-content">
+        <div id="debug-log" style="flex:1;overflow:auto;background:#1e1e1e;color:#d4d4d4;padding:12px;font-family:monospace;font-size:12px;line-height:1.4;white-space:pre-wrap;word-wrap:break-word;"></div>
+        <div style="padding:8px;border-top:1px solid #e5e7eb;display:flex;gap:8px;">
+          <button onclick="clearDebugLog()" style="flex:1;padding:8px;background:#ef4444;color:white;border:none;border-radius:4px;cursor:pointer;">Clear Log</button>
+          <button id="debug-pause-btn" onclick="toggleDebugPause()" style="flex:1;padding:8px;background:#3b82f6;color:white;border:none;border-radius:4px;cursor:pointer;">Pause</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -843,6 +853,8 @@
       const input = document.getElementById('msgInput');
       const msg = input.value.trim();
       if (!msg) return;
+
+      addDebugLine('[TX] ' + msg);
 
       fetch('/api/send', {
         method: 'POST',
@@ -1120,7 +1132,4 @@
           document.getElementById('crypt_l').value = c.crypt_l || 0;
           document.getElementById('savetype').value = c.savetype || 1;
         }
-      });
-  </script>
-</body>
-</html>
+      });\n\n    // Debug terminal output logging\n    let debugPaused = false;\n    let debugLogBuffer = [];\n    const MAX_LINES = 500;\n    const debugLog = document.getElementById('debug-log');\n\n    function addDebugLine(text) {\n      if (debugPaused) return;\n      debugLogBuffer.push(text);\n      if (debugLogBuffer.length > MAX_LINES) {\n        debugLogBuffer.shift();\n      }\n      updateDebugDisplay();\n    }\n\n    function updateDebugDisplay() {\n      debugLog.textContent = debugLogBuffer.join('\\n');\n      debugLog.parentElement.scrollTop = debugLog.parentElement.scrollHeight;\n    }\n\n    function clearDebugLog() {\n      debugLogBuffer = [];\n      updateDebugDisplay();\n    }\n\n    function toggleDebugPause() {\n      debugPaused = !debugPaused;\n      const btn = document.getElementById('debug-pause-btn');\n      btn.textContent = debugPaused ? 'Resume' : 'Pause';\n      btn.style.background = debugPaused ? '#10b981' : '#3b82f6';\n    }\n\n    // Polling for E220 messages\n    setInterval(() => {\n      fetch('/api/recv')\n        .then(r => r.json())\n        .then(data => {\n          if (data.message) {\n            addDebugLine('[RX] ' + data.message);\n          }\n        })\n        .catch(err => addDebugLine('[ERR] ' + err.message));\n    }, 500);\n  </script>\n</body>\n</html>
