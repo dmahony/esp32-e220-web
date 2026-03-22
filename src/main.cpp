@@ -232,17 +232,17 @@ void setupE220() {
 void setupWiFi() {
   preferences.begin("wifi", false);
 
-  // Load saved STA credentials
-  String savedSSID = preferences.getString("sta_ssid", "");
-  String savedPass = preferences.getString("sta_pass", "");
+  // Load saved STA credentials (check if key exists first to avoid NVS errors)
+  String savedSSID = preferences.isKey("sta_ssid") ? preferences.getString("sta_ssid", "") : "";
+  String savedPass = preferences.isKey("sta_pass") ? preferences.getString("sta_pass", "") : "";
   strlcpy(wifi_config.ssid, savedSSID.c_str(), sizeof(wifi_config.ssid));
   strlcpy(wifi_config.password, savedPass.c_str(), sizeof(wifi_config.password));
 
   // Load saved AP settings with defaults
   int randomNum = random(100, 1000);
   String defaultAP = "E220-Chat-" + String(randomNum);
-  String apSSID = preferences.getString("ap_ssid", defaultAP);
-  String apPass = preferences.getString("ap_pass", "password123");
+  String apSSID = preferences.isKey("ap_ssid") ? preferences.getString("ap_ssid", defaultAP) : defaultAP;
+  String apPass = preferences.isKey("ap_pass") ? preferences.getString("ap_pass", "password123") : "password123";
   strlcpy(wifi_config.ap_ssid, apSSID.c_str(), sizeof(wifi_config.ap_ssid));
   strlcpy(wifi_config.ap_password, apPass.c_str(), sizeof(wifi_config.ap_password));
 
