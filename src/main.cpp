@@ -188,15 +188,36 @@ void readE220Config() {
     uint8_t reg2 = e220Serial.read(); // channel
     uint8_t reg3 = e220Serial.read();
     
+    // Update e220_config struct from register values so web UI stays in sync
+    snprintf(e220_config.addr, sizeof(e220_config.addr), "0x%02X%02X", addh, addl);
+    e220_config.freq = 850.125 + reg2;
+    e220_config.airrate = reg0 & 0x07;
+    e220_config.parity = (reg0 >> 3) & 0x03;
+    
+    // Reverse baud from register bits
+    static const int baudTable[] = {1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200};
+    e220_config.baud = baudTable[(reg0 >> 5) & 0x07];
+    
+    e220_config.subpkt = (reg1 >> 6) & 0x03;
+    e220_config.rssi_noise = (reg1 >> 5) & 0x01;
+    // Reverse TX power from register bits
+    static const int powerTable30[] = {30, 27, 24, 21};
+    e220_config.txpower = powerTable30[reg1 & 0x03];
+    
+    e220_config.rssi_byte = (reg3 >> 7) & 0x01;
+    e220_config.txmode = (reg3 >> 6) & 0x01;
+    e220_config.lbt = (reg3 >> 4) & 0x01;
+    e220_config.wor_cycle = reg3 & 0x07;
+    
     Serial.println("[E220] Read config from module:");
     Serial.printf("  HDR=0x%02X START=0x%02X LEN=0x%02X\n", hdr, start, len);
     Serial.printf("  ADDH=0x%02X ADDL=0x%02X\n", addh, addl);
     Serial.printf("  REG0=0x%02X REG1=0x%02X REG2=0x%02X REG3=0x%02X\n", reg0, reg1, reg2, reg3);
-    Serial.printf("  Channel=%d -> Freq=%.3f MHz\n", reg2, 850.125 + reg2);
-    Serial.printf("  TX Power=%d dBm\n", 30 - (reg1 & 0x03) * 3);
-    Serial.printf("  Air Rate bits=%d\n", reg0 & 0x07);
-    Serial.printf("  Baud bits=%d\n", (reg0 >> 5) & 0x07);
-    Serial.printf("  TX Mode=%s\n", (reg3 & 0x40) ? "Fixed" : "Transparent");
+    Serial.printf("  Channel=%d -> Freq=%.3f MHz\n", reg2, e220_config.freq);
+    Serial.printf("  TX Power=%d dBm\n", e220_config.txpower);
+    Serial.printf("  Air Rate=%d (bits=%d)\n", e220_config.airrate, reg0 & 0x07);
+    Serial.printf("  Baud=%d\n", e220_config.baud);
+    Serial.printf("  TX Mode=%s\n", e220_config.txmode ? "Fixed" : "Transparent");
   } else {
     Serial.printf("[E220] Read failed, got %d bytes\n", avail);
     while(e220Serial.available()) {
