@@ -475,14 +475,34 @@ void setupWebRoutes() {
       int end = json.lastIndexOf("\"");
       String msg = json.substring(start, end);
       
-      e220Serial.println(msg);
+      // E220 has 400-byte buffer, 200-byte default subpacket. Chunk large messages.
+      const int CHUNK_SIZE = 190;  // Leave room for overhead
+      int msgLen = msg.length();
+      
+      if (msgLen <= CHUNK_SIZE) {
+        e220Serial.print(msg);
+        e220Serial.print('\n');
+      } else {
+        for (int i = 0; i < msgLen; i += CHUNK_SIZE) {
+          int end = min(i + CHUNK_SIZE, msgLen);
+          String chunk = msg.substring(i, end);
+          e220Serial.print(chunk);
+          e220Serial.flush();
+          // Wait for E220 buffer to clear (AUX goes HIGH when ready)
+          waitE220Ready(3000);
+          delay(50);
+        }
+        e220Serial.print('\n');
+      }
+      e220Serial.flush();
+      
       if (chatIndex < 100) {
         chatHistory[chatIndex] = "[TX] " + msg;
         chatIndex++;
       }
       
       request->send(200, "application/json", "{\"status\":\"ok\"}");
-      Serial.print("[TX] ");
+      Serial.printf("[TX] (%d bytes) ", msgLen);
       Serial.println(msg);
     } else {
       request->send(400, "application/json", "{\"error\":\"no message\"}");
@@ -735,13 +755,31 @@ void handleUSBSerial() {
       Serial.println("  /help     - This help");
     }
     else {
-      // Everything else is a message - send it
-      e220Serial.println(input);
+      // Everything else is a message - send it (chunked for large messages)
+      const int CHUNK_SIZE = 190;
+      int inputLen = input.length();
+      
+      if (inputLen <= CHUNK_SIZE) {
+        e220Serial.print(input);
+        e220Serial.print('\n');
+      } else {
+        for (int i = 0; i < inputLen; i += CHUNK_SIZE) {
+          int end = min(i + CHUNK_SIZE, inputLen);
+          String chunk = input.substring(i, end);
+          e220Serial.print(chunk);
+          e220Serial.flush();
+          waitE220Ready(3000);
+          delay(50);
+        }
+        e220Serial.print('\n');
+      }
+      e220Serial.flush();
+      
       if (chatIndex < 100) {
         chatHistory[chatIndex] = "[TX] " + input;
         chatIndex++;
       }
-      Serial.printf("[TX] %s\n", input.c_str());
+      Serial.printf("[TX] (%d bytes) %s\n", inputLen, input.c_str());
     }
   }
 }
