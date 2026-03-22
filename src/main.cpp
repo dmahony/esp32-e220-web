@@ -507,46 +507,64 @@ void setupWebRoutes() {
   });
 
   // Send message API
-  server.on("/api/send", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
-  [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-    String json = String((char*)data, len);
-    if (json.indexOf("message") != -1) {
-      int start = json.indexOf(":") + 2;  // Skip past: {"message":"
-      int end = json.lastIndexOf("\"");
-      String msg = json.substring(start, end);
-      
-      // E220 has 400-byte buffer, 200-byte default subpacket. Chunk large messages.
-      const int CHUNK_SIZE = 190;  // Leave room for overhead
-      int msgLen = msg.length();
-      
-      if (msgLen <= CHUNK_SIZE) {
-        e220Serial.print(msg);
-        e220Serial.print('\n');
-      } else {
-        for (int i = 0; i < msgLen; i += CHUNK_SIZE) {
-          int end = min(i + CHUNK_SIZE, msgLen);
-          String chunk = msg.substring(i, end);
-          e220Serial.print(chunk);
-          e220Serial.flush();
-          // Wait for E220 buffer to clear (AUX goes HIGH when ready)
-          waitE220Ready(3000);
-          delay(50);
-        }
-        e220Serial.print('\n');
-      }
-      e220Serial.flush();
-      
-      if (chatIndex < 100) {
-        chatHistory[chatIndex] = "[TX] " + msg;
-        chatIndex++;
-      }
-      
-      request->send(200, "application/json", "{\"status\":\"ok\"}");
-      Serial.printf("[TX] (%d bytes) ", msgLen);
-      Serial.println(msg);
-    } else {
-      request->send(400, "application/json", "{\"error\":\"no message\"}");
+  // Static buffer to reassemble chunked POST bodies from AsyncWebServer
+  static String sendBodyBuffer;
+  server.on("/api/send", HTTP_POST,
+  // onRequest: called after ALL body chunks received - do the actual work here
+  [](AsyncWebServerRequest *request) {
+    if (sendBodyBuffer.length() == 0) {
+      request->send(400, "application/json", "{\"error\":\"empty body\"}");
+      return;
     }
+    
+    DynamicJsonDocument doc(sendBodyBuffer.length() + 128);
+    DeserializationError error = deserializeJson(doc, sendBodyBuffer);
+    sendBodyBuffer = "";  // Free memory immediately
+    
+    if (error || !doc.containsKey("message")) {
+      request->send(400, "application/json", "{\"error\":\"no message\"}");
+      return;
+    }
+    
+    String msg = doc["message"].as<String>();
+    
+    // E220 has 400-byte buffer, 200-byte default subpacket. Chunk large messages.
+    const int CHUNK_SIZE = 190;  // Leave room for overhead
+    int msgLen = msg.length();
+    
+    if (msgLen <= CHUNK_SIZE) {
+      e220Serial.print(msg);
+      e220Serial.print('\n');
+    } else {
+      for (int i = 0; i < msgLen; i += CHUNK_SIZE) {
+        int chunkEnd = min(i + CHUNK_SIZE, msgLen);
+        String chunk = msg.substring(i, chunkEnd);
+        e220Serial.print(chunk);
+        e220Serial.flush();
+        // Wait for E220 buffer to clear (AUX goes HIGH when ready)
+        waitE220Ready(3000);
+        delay(50);
+      }
+      e220Serial.print('\n');
+    }
+    e220Serial.flush();
+    
+    if (chatIndex < 100) {
+      chatHistory[chatIndex] = "[TX] " + msg;
+      chatIndex++;
+    }
+    
+    request->send(200, "application/json", "{\"status\":\"ok\"}");
+    Serial.printf("[TX] (%d bytes) ", msgLen);
+    Serial.println(msg);
+  }, NULL,
+  // onBody: accumulate chunks into buffer
+  [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    if (index == 0) {
+      sendBodyBuffer = "";
+      sendBodyBuffer.reserve(total);
+    }
+    sendBodyBuffer += String((char*)data, len);
   });
 
   // Get config API
