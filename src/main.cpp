@@ -805,7 +805,7 @@ void setupWebRoutes() {
 }
 
 // RX buffer for reassembling large incoming messages
-static uint8_t rxBuf[512];
+static uint8_t rxBuf[2048];
 static int rxLen = 0;
 static unsigned long lastRxTime = 0;
 // If no new data for this many ms, flush whatever we have as a complete message
@@ -835,7 +835,7 @@ void processRxPacket() {
   if (e220_config.rssi_byte) {
     // Strip RSSI bytes embedded at every sub-packet boundary
     int subPktSize = getSubPacketSize();
-    uint8_t cleaned[512];
+    static uint8_t cleaned[2048];
     int cleanLen = 0;
     int dataCount = 0;  // bytes of actual data seen since last RSSI strip
     
