@@ -11,7 +11,8 @@
 #define E220_M0_PIN   2
 #define E220_M1_PIN   19
 #define E220_AUX_PIN  4
-#define UART_BAUD     9600
+#define UART_BAUD_CONFIG  9600    // E220 config mode always uses 9600
+#define UART_BAUD_NORMAL  115200  // Normal mode baud rate
 
 AsyncWebServer server(80);
 Preferences preferences;
@@ -46,7 +47,7 @@ struct {
   int crypt_h;       // REG 06h: encryption key high byte (write-only)
   int crypt_l;       // REG 07h: encryption key low byte (write-only)
   int savetype;      // 0=C2 (RAM only), 1=C0 (save to flash)
-} e220_config = {930.125, 21, 9600, "0x0000", "0xFFFF", 2, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0};
+} e220_config = {930.125, 21, 115200, "0x0000", "0xFFFF", 2, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0};
 
 void setE220Mode(uint8_t mode) {
   if (mode == 1) {
@@ -95,6 +96,15 @@ bool waitE220Busy(uint32_t timeout_ms = 1000) {
   }
   Serial.printf("[E220] Timeout waiting for AUX busy after %u ms\n", timeout_ms);
   return false;
+}
+
+// Change UART baud rate (switches ESP32 serial port only, doesn't change E220 module)
+void setE220UARTBaud(int baud) {
+  Serial.printf("[E220] Changing UART baud from %d to %d\n", UART_BAUD_CONFIG, baud);
+  e220Serial.end();
+  delay(50);
+  e220Serial.begin(baud, SERIAL_8N1, E220_RX_PIN, E220_TX_PIN);
+  delay(50);
 }
 
 uint8_t baudToReg(int baud) {
@@ -270,6 +280,13 @@ void applyE220Config() {
   
   Serial.println("[E220] Config applied, back to normal mode");
   
+  // Switch UART baud if configured differently
+  if (e220_config.baud != UART_BAUD_CONFIG) {
+    Serial.printf("[E220] Switching UART to configured baud rate: %d\n", e220_config.baud);
+    delay(500);  // Wait for E220 to switch (per manual)
+    setE220UARTBaud(e220_config.baud);
+  }
+  
   // Read back to verify
   delay(200);
   readE220Config();
@@ -279,7 +296,8 @@ void setupE220() {
   pinMode(E220_M0_PIN, OUTPUT);
   pinMode(E220_M1_PIN, OUTPUT);
   pinMode(E220_AUX_PIN, INPUT);  // AUX is a status input (HIGH=ready, LOW=busy)
-  e220Serial.begin(UART_BAUD, SERIAL_8N1, E220_RX_PIN, E220_TX_PIN);
+  // Start with config baud (9600) - will switch to normal baud after config
+  e220Serial.begin(UART_BAUD_CONFIG, SERIAL_8N1, E220_RX_PIN, E220_TX_PIN);
   setE220Mode(0);
   delay(100);  // Wait for module startup (T1 = ~16ms per manual)
   if (waitE220Ready(1000)) {
