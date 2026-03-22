@@ -4,6 +4,7 @@
 #include <ESPAsyncWebServer.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 
 #define E220_RX_PIN   21
 #define E220_TX_PIN   22
@@ -12,30 +13,39 @@
 #define UART_BAUD     9600
 
 AsyncWebServer server(80);
+Preferences preferences;
+
+struct {
+  char ssid[64];
+  char password[64];
+  char ap_ssid[64];
+  char ap_password[64];
+} wifi_config = {"", "", "", "password123"};
+
 HardwareSerial e220Serial(2);
 String chatHistory[100];
 int chatIndex = 0;
 
-// E220 Config stored in EEPROM
+// E220 Config - matches actual E220 registers (00h-07h)
+// See E220-xxxTxxx_UserManual_EN.pdf Section 6.2-6.3
 struct {
-  float freq;
-  int txpower;
-  int baud;
-  char addr[8];
-  char dest[8];
-  int netid;
-  int airrate;
-  int pktsize;
-  int rxtmo;
-  int txwait;
-  int subpkt;
-  int rssi;
-  int crc;
-  int repeater;
-  int parity;
-  int txmode;
-  int savetype;
-} e220_config = {930.125, 21, 9600, "0x0000", "0xFFFF", 0, 4, 0, 1000, 0, 1, -100, 1, 0, 0, 0, 0};
+  float freq;        // Derived from REG2 channel: 850.125 + CH (900MHz band)
+  int txpower;       // REG1[1:0]: 30=0x00, 27=0x01, 24=0x02, 21=0x03 (for 30dBm models)
+  int baud;          // REG0[7:5]: 1200-115200
+  char addr[8];      // ADDH(00h) + ADDL(01h): module address "0xHHLL"
+  char dest[8];      // Destination for fixed-point TX (not a register, used in TX prefix)
+  int airrate;       // REG0[2:0]: 0-2=2.4k, 3=4.8k, 4=9.6k, 5=19.2k, 6=38.4k, 7=62.5k
+  int subpkt;        // REG1[7:6]: 0=200B, 1=128B, 2=64B, 3=32B
+  int parity;        // REG0[4:3]: 0=8N1, 1=8O1, 2=8E1
+  int txmode;        // REG3[6]: 0=transparent, 1=fixed-point
+  int rssi_noise;    // REG1[5]: 0=disabled, 1=enable ambient noise RSSI
+  int rssi_byte;     // REG3[7]: 0=disabled, 1=append RSSI byte to RX data
+  int lbt;           // REG3[4]: 0=disabled, 1=listen-before-talk
+  int wor_cycle;     // REG3[2:0]: period = (1+WOR)*500ms, 0=500ms..7=4000ms
+  int crypt_h;       // REG 06h: encryption key high byte (write-only)
+  int crypt_l;       // REG 07h: encryption key low byte (write-only)
+  int savetype;      // 0=C2 (RAM only), 1=C0 (save to flash)
+} e220_config = {930.125, 21, 9600, "0x0000", "0xFFFF", 2, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0};
 
 void setE220Mode(uint8_t mode) {
   if (mode == 1) {
@@ -48,38 +58,167 @@ void setE220Mode(uint8_t mode) {
   delay(50);
 }
 
-void applyE220Config() {
-  // Set to CONFIG mode (M0=1, M1=1)
+uint8_t baudToReg(int baud) {
+  switch(baud) {
+    case 1200:   return 0;
+    case 2400:   return 1;
+    case 4800:   return 2;
+    case 9600:   return 3;
+    case 19200:  return 4;
+    case 38400:  return 5;
+    case 57600:  return 6;
+    case 115200: return 7;
+    default:     return 3; // 9600
+  }
+}
+
+uint8_t txpowerToReg(int dbm) {
+  switch(dbm) {
+    case 30: return 0;
+    case 27: return 1;
+    case 24: return 2;
+    case 21: return 3;
+    default: return 3; // 21 dBm
+  }
+}
+
+void readE220Config() {
+  // Enter CONFIG mode (M0=1, M1=1)
   digitalWrite(E220_M0_PIN, HIGH);
   digitalWrite(E220_M1_PIN, HIGH);
   delay(100);
   
-  // Build config command
-  // E220 uses binary protocol or AT commands depending on firmware
-  // For simplicity, send configuration bytes
-  uint8_t config[6] = {
-    0xC0,                           // Address high byte
-    (uint8_t)(e220_config.netid),  // Address low byte  
-    0x00 | (e220_config.airrate << 3) | (e220_config.pktsize << 6),  // SPED
-    (uint8_t)((int)(e220_config.freq * 10) % 256),                  // CHAN (derived from freq)
-    0x40 | (e220_config.crc << 4) | (e220_config.txmode << 7),     // OPMODE
-    (e220_config.savetype == 1) ? 0xC0 : 0x80                        // SAVETYPE
-  };
+  // Flush any stale data
+  while(e220Serial.available()) e220Serial.read();
   
-  e220Serial.write(0xC0);
-  e220Serial.write(config[1]);
-  e220Serial.write(config[2]);
-  e220Serial.write(config[3]);
-  e220Serial.write(config[4]);
-  e220Serial.write(config[5]);
+  // Read registers 0x00-0x05: CMD(0xC1) + START(0x00) + LEN(0x06)
+  uint8_t readCmd[3] = {0xC1, 0x00, 0x06};
+  e220Serial.write(readCmd, 3);
   e220Serial.flush();
+  
+  delay(200);
+  
+  // Response: 0xC1 + START + LEN + ADDH + ADDL + REG0 + REG1 + REG2 + REG3
+  if (e220Serial.available() >= 9) {
+    uint8_t hdr = e220Serial.read(); // 0xC1
+    uint8_t start = e220Serial.read(); // 0x00
+    uint8_t len = e220Serial.read(); // 0x06
+    uint8_t addh = e220Serial.read();
+    uint8_t addl = e220Serial.read();
+    uint8_t reg0 = e220Serial.read();
+    uint8_t reg1 = e220Serial.read();
+    uint8_t reg2 = e220Serial.read(); // channel
+    uint8_t reg3 = e220Serial.read();
+    
+    Serial.println("[E220] Read config from module:");
+    Serial.printf("  ADDH=0x%02X ADDL=0x%02X\n", addh, addl);
+    Serial.printf("  REG0=0x%02X REG1=0x%02X REG2=0x%02X REG3=0x%02X\n", reg0, reg1, reg2, reg3);
+    Serial.printf("  Channel=%d -> Freq=%.3f MHz\n", reg2, 850.125 + reg2);
+    Serial.printf("  TX Power=%d dBm\n", 30 - (reg1 & 0x03) * 3);
+    Serial.printf("  Air Rate bits=%d\n", reg0 & 0x07);
+    Serial.printf("  Baud bits=%d\n", (reg0 >> 5) & 0x07);
+    Serial.printf("  TX Mode=%s\n", (reg3 & 0x40) ? "Fixed" : "Transparent");
+  } else {
+    Serial.printf("[E220] Read failed, got %d bytes\n", e220Serial.available());
+    while(e220Serial.available()) {
+      Serial.printf("  0x%02X\n", e220Serial.read());
+    }
+  }
+  
+  // Return to NORMAL mode
+  setE220Mode(0);
+}
+
+void applyE220Config() {
+  // Enter CONFIG mode (M0=1, M1=1) - serial port MUST be 9600 8N1 in this mode
+  digitalWrite(E220_M0_PIN, HIGH);
+  digitalWrite(E220_M1_PIN, HIGH);
+  delay(200);  // Manual says wait for AUX to go high
+  
+  // Flush any stale data
+  while(e220Serial.available()) e220Serial.read();
+  
+  // Parse address from hex string "0xHHLL" -> ADDH, ADDL
+  uint16_t addr = (uint16_t)strtol(e220_config.addr, NULL, 16);
+  uint8_t addh = (addr >> 8) & 0xFF;
+  uint8_t addl = addr & 0xFF;
+  
+  // REG0 (02h): [7:5] UART baud, [4:3] parity, [2:0] air data rate
+  uint8_t reg0 = (baudToReg(e220_config.baud) << 5) | 
+                 ((e220_config.parity & 0x03) << 3) | 
+                 (e220_config.airrate & 0x07);
+  
+  // REG1 (03h): [7:6] subpacket, [5] RSSI ambient noise, [4:3] reserved, [2] soft switch, [1:0] TX power
+  uint8_t reg1 = ((e220_config.subpkt & 0x03) << 6) | 
+                 ((e220_config.rssi_noise & 0x01) << 5) |
+                 (txpowerToReg(e220_config.txpower) & 0x03);
+  
+  // REG2 (04h): Channel number
+  // E220-900T30D: freq = 850.125 + CH (MHz), CH = 0-80
+  uint8_t reg2 = (uint8_t)(e220_config.freq - 850.125);
+  if (reg2 > 80) reg2 = 80;
+  
+  // REG3 (05h): [7] RSSI byte, [6] TX method, [5] reserved, [4] LBT, [3] reserved, [2:0] WOR cycle
+  uint8_t reg3 = ((e220_config.rssi_byte & 0x01) << 7) |
+                 ((e220_config.txmode & 0x01) << 6) |
+                 ((e220_config.lbt & 0x01) << 4) |
+                 (e220_config.wor_cycle & 0x07);
+  
+  // CRYPT (06h-07h): Encryption key
+  uint8_t crypt_h = (uint8_t)(e220_config.crypt_h & 0xFF);
+  uint8_t crypt_l = (uint8_t)(e220_config.crypt_l & 0xFF);
+  
+  // Command: 0xC0 (save to flash) or 0xC2 (temp/RAM only)
+  uint8_t cmd = (e220_config.savetype == 1) ? 0xC0 : 0xC2;
+  
+  // Write all 8 registers: CMD + START(0x00) + LEN(0x08) + ADDH + ADDL + REG0-REG3 + CRYPT_H + CRYPT_L
+  uint8_t packet[11] = {cmd, 0x00, 0x08, addh, addl, reg0, reg1, reg2, reg3, crypt_h, crypt_l};
+  
+  Serial.println("[E220] Writing config:");
+  Serial.printf("  CMD=0x%02X (%s)\n", cmd, cmd == 0xC0 ? "SAVE TO FLASH" : "RAM ONLY");
+  Serial.printf("  ADDH=0x%02X ADDL=0x%02X (addr=%s)\n", addh, addl, e220_config.addr);
+  Serial.printf("  REG0=0x%02X: baud=%d parity=%d airrate=%d\n", reg0, e220_config.baud, e220_config.parity, e220_config.airrate);
+  Serial.printf("  REG1=0x%02X: subpkt=%d rssi_noise=%d txpower=%d dBm\n", reg1, e220_config.subpkt, e220_config.rssi_noise, e220_config.txpower);
+  Serial.printf("  REG2=0x%02X: channel=%d freq=%.3f MHz\n", reg2, reg2, 850.125 + reg2);
+  Serial.printf("  REG3=0x%02X: rssi_byte=%d txmode=%s lbt=%d wor=%d\n", reg3, e220_config.rssi_byte, e220_config.txmode ? "FIXED" : "TRANSPARENT", e220_config.lbt, e220_config.wor_cycle);
+  Serial.printf("  CRYPT=0x%02X%02X\n", crypt_h, crypt_l);
+  
+  e220Serial.write(packet, 11);
+  e220Serial.flush();
+  
+  delay(200);
+  
+  // Read response: E220 echoes C1 + start + len + data
+  int avail = e220Serial.available();
+  if (avail > 0) {
+    Serial.printf("[E220] Response (%d bytes):", avail);
+    bool ok = false;
+    uint8_t first = 0;
+    while(e220Serial.available()) {
+      uint8_t b = e220Serial.read();
+      if (!first) first = b;
+      Serial.printf(" 0x%02X", b);
+    }
+    Serial.println();
+    if (first == 0xC1) {
+      Serial.println("[E220] Config write SUCCESS (C1 acknowledged)");
+    } else if (first == 0xFF) {
+      Serial.println("[E220] Config write FAILED (FF FF FF = format error!)");
+    }
+  } else {
+    Serial.println("[E220] WARNING: No response from module!");
+  }
   
   delay(100);
   
   // Return to NORMAL mode (M0=0, M1=0)
   setE220Mode(0);
   
-  Serial.println("[E220] Config applied");
+  Serial.println("[E220] Config applied, back to normal mode");
+  
+  // Read back to verify
+  delay(200);
+  readE220Config();
 }
 
 void setupE220() {
@@ -91,15 +230,53 @@ void setupE220() {
 }
 
 void setupWiFi() {
-  WiFi.mode(WIFI_AP);
-  // Generate random 3-digit number (100-999) for unique SSID
+  preferences.begin("wifi", false);
+
+  // Load saved STA credentials
+  String savedSSID = preferences.getString("sta_ssid", "");
+  String savedPass = preferences.getString("sta_pass", "");
+  strlcpy(wifi_config.ssid, savedSSID.c_str(), sizeof(wifi_config.ssid));
+  strlcpy(wifi_config.password, savedPass.c_str(), sizeof(wifi_config.password));
+
+  // Load saved AP settings with defaults
   int randomNum = random(100, 1000);
-  String ssidName = "E220-Chat-" + String(randomNum);
-  WiFi.softAP(ssidName.c_str(), "password123");
-  Serial.print("[WiFi] SSID: ");
-  Serial.println(ssidName);
-  Serial.print("[WiFi] IP: ");
+  String defaultAP = "E220-Chat-" + String(randomNum);
+  String apSSID = preferences.getString("ap_ssid", defaultAP);
+  String apPass = preferences.getString("ap_pass", "password123");
+  strlcpy(wifi_config.ap_ssid, apSSID.c_str(), sizeof(wifi_config.ap_ssid));
+  strlcpy(wifi_config.ap_password, apPass.c_str(), sizeof(wifi_config.ap_password));
+
+  // Start AP+STA mode
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
+  Serial.print("[WiFi] AP SSID: ");
+  Serial.println(wifi_config.ap_ssid);
+  Serial.print("[WiFi] AP IP: ");
   Serial.println(WiFi.softAPIP());
+
+  // If saved STA credentials exist, attempt connection
+  if (strlen(wifi_config.ssid) > 0) {
+    Serial.printf("[WiFi] Connecting to '%s'...\n", wifi_config.ssid);
+    WiFi.begin(wifi_config.ssid, wifi_config.password);
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+      delay(250);
+      Serial.print(".");
+    }
+    Serial.println();
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("[WiFi] STA connected, IP: ");
+      Serial.println(WiFi.localIP());
+    } else {
+      Serial.println("[WiFi] STA connection failed, AP-only mode");
+      WiFi.mode(WIFI_AP);
+      WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
+    }
+  } else {
+    Serial.println("[WiFi] No saved STA credentials, AP-only mode");
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
+  }
 }
 
 void setupFS() {
@@ -198,17 +375,16 @@ void setupWebRoutes() {
     config["baud"] = e220_config.baud;
     config["addr"] = e220_config.addr;
     config["dest"] = e220_config.dest;
-    config["netid"] = e220_config.netid;
     config["airrate"] = e220_config.airrate;
-    config["pktsize"] = e220_config.pktsize;
-    config["rxtmo"] = e220_config.rxtmo;
-    config["txwait"] = e220_config.txwait;
     config["subpkt"] = e220_config.subpkt;
-    config["rssi"] = e220_config.rssi;
-    config["crc"] = e220_config.crc;
-    config["repeater"] = e220_config.repeater;
     config["parity"] = e220_config.parity;
     config["txmode"] = e220_config.txmode;
+    config["rssi_noise"] = e220_config.rssi_noise;
+    config["rssi_byte"] = e220_config.rssi_byte;
+    config["lbt"] = e220_config.lbt;
+    config["wor_cycle"] = e220_config.wor_cycle;
+    config["crypt_h"] = e220_config.crypt_h;
+    config["crypt_l"] = e220_config.crypt_l;
     config["savetype"] = e220_config.savetype;
     
     String response;
@@ -227,50 +403,151 @@ void setupWebRoutes() {
       return;
     }
     
-    // Update config - all parameters
+    // Update config - matches actual E220 registers
     if (doc.containsKey("freq")) e220_config.freq = doc["freq"];
     if (doc.containsKey("txpower")) e220_config.txpower = doc["txpower"];
     if (doc.containsKey("baud")) e220_config.baud = doc["baud"];
     if (doc.containsKey("addr")) strlcpy(e220_config.addr, doc["addr"], sizeof(e220_config.addr));
     if (doc.containsKey("dest")) strlcpy(e220_config.dest, doc["dest"], sizeof(e220_config.dest));
-    if (doc.containsKey("netid")) e220_config.netid = doc["netid"];
     if (doc.containsKey("airrate")) e220_config.airrate = doc["airrate"];
-    if (doc.containsKey("pktsize")) e220_config.pktsize = doc["pktsize"];
-    if (doc.containsKey("rxtmo")) e220_config.rxtmo = doc["rxtmo"];
-    if (doc.containsKey("txwait")) e220_config.txwait = doc["txwait"];
     if (doc.containsKey("subpkt")) e220_config.subpkt = doc["subpkt"];
-    if (doc.containsKey("rssi")) e220_config.rssi = doc["rssi"];
-    if (doc.containsKey("crc")) e220_config.crc = doc["crc"];
-    if (doc.containsKey("repeater")) e220_config.repeater = doc["repeater"];
     if (doc.containsKey("parity")) e220_config.parity = doc["parity"];
     if (doc.containsKey("txmode")) e220_config.txmode = doc["txmode"];
+    if (doc.containsKey("rssi_noise")) e220_config.rssi_noise = doc["rssi_noise"];
+    if (doc.containsKey("rssi_byte")) e220_config.rssi_byte = doc["rssi_byte"];
+    if (doc.containsKey("lbt")) e220_config.lbt = doc["lbt"];
+    if (doc.containsKey("wor_cycle")) e220_config.wor_cycle = doc["wor_cycle"];
+    if (doc.containsKey("crypt_h")) e220_config.crypt_h = doc["crypt_h"];
+    if (doc.containsKey("crypt_l")) e220_config.crypt_l = doc["crypt_l"];
     if (doc.containsKey("savetype")) e220_config.savetype = doc["savetype"];
     
-    Serial.println("[CONFIG] Updated all parameters:");
-    Serial.print("  freq="); Serial.print(e220_config.freq);
-    Serial.print(" txpower="); Serial.print(e220_config.txpower);
-    Serial.print(" baud="); Serial.println(e220_config.baud);
-    Serial.print("  addr="); Serial.print(e220_config.addr);
-    Serial.print(" dest="); Serial.print(e220_config.dest);
-    Serial.print(" netid="); Serial.println(e220_config.netid);
-    Serial.print("  airrate="); Serial.print(e220_config.airrate);
-    Serial.print(" pktsize="); Serial.println(e220_config.pktsize);
-    Serial.print("  rxtmo="); Serial.print(e220_config.rxtmo);
-    Serial.print(" txwait="); Serial.print(e220_config.txwait);
-    Serial.print(" subpkt="); Serial.println(e220_config.subpkt);
-    Serial.print("  rssi="); Serial.print(e220_config.rssi);
-    Serial.print(" crc="); Serial.print(e220_config.crc);
-    Serial.print(" repeater="); Serial.println(e220_config.repeater);
-    Serial.print("  parity="); Serial.print(e220_config.parity);
-    Serial.print(" txmode="); Serial.print(e220_config.txmode);
-    Serial.print(" savetype="); Serial.println(e220_config.savetype);
+    Serial.println("[CONFIG] Updated parameters:");
+    Serial.printf("  freq=%.3f txpower=%d baud=%d\n", e220_config.freq, e220_config.txpower, e220_config.baud);
+    Serial.printf("  addr=%s dest=%s\n", e220_config.addr, e220_config.dest);
+    Serial.printf("  airrate=%d subpkt=%d parity=%d txmode=%d\n", e220_config.airrate, e220_config.subpkt, e220_config.parity, e220_config.txmode);
+    Serial.printf("  rssi_noise=%d rssi_byte=%d lbt=%d wor=%d\n", e220_config.rssi_noise, e220_config.rssi_byte, e220_config.lbt, e220_config.wor_cycle);
+    Serial.printf("  crypt=0x%02X%02X savetype=%d\n", e220_config.crypt_h, e220_config.crypt_l, e220_config.savetype);
     
-    // Apply config to E220 module if savetype is 1 (EEPROM)
-    if (e220_config.savetype == 1) {
-      applyE220Config();
-    }
+    // Always apply config to the E220 module
+    applyE220Config();
     
     request->send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+
+  // Reboot API
+  server.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest *request) {
+    request->send(200, "application/json", "{\"status\":\"rebooting\"}");
+    Serial.println("[SYS] Reboot requested via web");
+    delay(500);
+    ESP.restart();
+  });
+
+  // WiFi status API
+  server.on("/api/wifi/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    DynamicJsonDocument doc(512);
+    wifi_mode_t mode = WiFi.getMode();
+    doc["mode"] = (mode == WIFI_AP) ? "AP" : (mode == WIFI_STA) ? "STA" : "AP_STA";
+    doc["ap_ssid"] = String(wifi_config.ap_ssid);
+    doc["ap_ip"] = WiFi.softAPIP().toString();
+    doc["sta_connected"] = (WiFi.status() == WL_CONNECTED);
+    if (WiFi.status() == WL_CONNECTED) {
+      doc["sta_ssid"] = WiFi.SSID();
+      doc["sta_ip"] = WiFi.localIP().toString();
+      doc["sta_rssi"] = WiFi.RSSI();
+    }
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+
+  // WiFi scan API
+  server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
+    int n = WiFi.scanNetworks();
+    DynamicJsonDocument doc(2048);
+    JsonArray networks = doc.createNestedArray("networks");
+    for (int i = 0; i < n && i < 20; i++) {
+      JsonObject net = networks.createNestedObject();
+      net["ssid"] = WiFi.SSID(i);
+      net["rssi"] = WiFi.RSSI(i);
+      net["encryption"] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Encrypted";
+      net["channel"] = WiFi.channel(i);
+    }
+    WiFi.scanDelete();
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+
+  // WiFi connect API
+  server.on("/api/wifi/connect", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+  [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, (const char*)data, len)) {
+      request->send(400, "application/json", "{\"error\":\"JSON parse error\"}");
+      return;
+    }
+    const char* ssid = doc["ssid"] | "";
+    const char* pass = doc["password"] | "";
+    if (strlen(ssid) == 0) {
+      request->send(400, "application/json", "{\"error\":\"SSID required\"}");
+      return;
+    }
+    // Save credentials
+    preferences.putString("sta_ssid", ssid);
+    preferences.putString("sta_pass", pass);
+    strlcpy(wifi_config.ssid, ssid, sizeof(wifi_config.ssid));
+    strlcpy(wifi_config.password, pass, sizeof(wifi_config.password));
+
+    // Attempt connection
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
+    WiFi.begin(ssid, pass);
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+      delay(250);
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("[WiFi] Connected to %s, IP: %s\n", ssid, WiFi.localIP().toString().c_str());
+      request->send(200, "application/json", "{\"status\":\"connected\",\"ip\":\"" + WiFi.localIP().toString() + "\"}");
+    } else {
+      Serial.printf("[WiFi] Failed to connect to %s\n", ssid);
+      request->send(200, "application/json", "{\"status\":\"failed\"}");
+    }
+  });
+
+  // WiFi disconnect API
+  server.on("/api/wifi/disconnect", HTTP_POST, [](AsyncWebServerRequest *request) {
+    WiFi.disconnect(true);
+    preferences.remove("sta_ssid");
+    preferences.remove("sta_pass");
+    wifi_config.ssid[0] = '\0';
+    wifi_config.password[0] = '\0';
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
+    Serial.println("[WiFi] Disconnected STA, cleared credentials");
+    request->send(200, "application/json", "{\"status\":\"disconnected\"}");
+  });
+
+  // WiFi AP settings API
+  server.on("/api/wifi/ap", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+  [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, (const char*)data, len)) {
+      request->send(400, "application/json", "{\"error\":\"JSON parse error\"}");
+      return;
+    }
+    const char* ssid = doc["ssid"] | "";
+    const char* pass = doc["password"] | "";
+    if (strlen(ssid) > 0) {
+      preferences.putString("ap_ssid", ssid);
+      strlcpy(wifi_config.ap_ssid, ssid, sizeof(wifi_config.ap_ssid));
+    }
+    if (strlen(pass) >= 8) {
+      preferences.putString("ap_pass", pass);
+      strlcpy(wifi_config.ap_password, pass, sizeof(wifi_config.ap_password));
+    }
+    Serial.printf("[WiFi] AP settings saved: SSID=%s (reboot required)\n", wifi_config.ap_ssid);
+    request->send(200, "application/json", "{\"status\":\"saved\",\"note\":\"Reboot to apply\"}");
   });
 
   server.begin();
@@ -293,69 +570,55 @@ void handleE220Serial() {
 
 void handleUSBSerial() {
   while (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
+    String input = Serial.readStringUntil('\n');
+    input.trim();
     
-    if (cmd.length() == 0) return;
+    if (input.length() == 0) return;
     
-    // Commands:
-    // "send <message>" - send via E220
-    // "config" - show current config
-    // "history" - show chat history
-    // "clear" - clear chat history
-    
-    if (cmd.startsWith("send ")) {
-      String msg = cmd.substring(5);
-      e220Serial.println(msg);
-      if (chatIndex < 100) {
-        chatHistory[chatIndex] = "[TX] " + msg;
-        chatIndex++;
-      }
-      Serial.println("[OK] Sent");
+    // Slash commands for config/admin, everything else is a message
+    if (input == "/config") {
+      Serial.println("[CONFIG] Current settings:");
+      Serial.printf("  freq=%.3f MHz (CH=%d)\n", e220_config.freq, (int)(e220_config.freq - 850.125));
+      Serial.printf("  txpower=%d dBm\n", e220_config.txpower);
+      Serial.printf("  baud=%d\n", e220_config.baud);
+      Serial.printf("  addr=%s  dest=%s\n", e220_config.addr, e220_config.dest);
+      Serial.printf("  airrate=%d  subpkt=%d  parity=%d\n", e220_config.airrate, e220_config.subpkt, e220_config.parity);
+      Serial.printf("  txmode=%s\n", e220_config.txmode ? "FIXED" : "TRANSPARENT");
+      Serial.printf("  rssi_noise=%d  rssi_byte=%d\n", e220_config.rssi_noise, e220_config.rssi_byte);
+      Serial.printf("  lbt=%d  wor_cycle=%d\n", e220_config.lbt, e220_config.wor_cycle);
+      Serial.printf("  crypt=0x%02X%02X  savetype=%d\n", e220_config.crypt_h, e220_config.crypt_l, e220_config.savetype);
     }
-    else if (cmd == "config") {
-      Serial.print("freq="); Serial.println(e220_config.freq);
-      Serial.print("txpower="); Serial.println(e220_config.txpower);
-      Serial.print("baud="); Serial.println(e220_config.baud);
-      Serial.print("addr="); Serial.println(e220_config.addr);
-      Serial.print("dest="); Serial.println(e220_config.dest);
-      Serial.print("netid="); Serial.println(e220_config.netid);
-      Serial.print("airrate="); Serial.println(e220_config.airrate);
-      Serial.print("pktsize="); Serial.println(e220_config.pktsize);
-      Serial.print("rxtmo="); Serial.println(e220_config.rxtmo);
-      Serial.print("txwait="); Serial.println(e220_config.txwait);
-      Serial.print("subpkt="); Serial.println(e220_config.subpkt);
-      Serial.print("rssi="); Serial.println(e220_config.rssi);
-      Serial.print("crc="); Serial.println(e220_config.crc);
-      Serial.print("repeater="); Serial.println(e220_config.repeater);
-      Serial.print("parity="); Serial.println(e220_config.parity);
-      Serial.print("txmode="); Serial.println(e220_config.txmode);
-      Serial.print("savetype="); Serial.println(e220_config.savetype);
+    else if (input == "/read") {
+      Serial.println("[E220] Reading module registers...");
+      readE220Config();
     }
-    else if (cmd == "history") {
-      Serial.print("[HISTORY] ");
-      Serial.print(chatIndex);
-      Serial.println(" messages:");
+    else if (input == "/history") {
+      Serial.printf("[HISTORY] %d messages:\n", chatIndex);
       for (int i = 0; i < chatIndex; i++) {
-        Serial.print(i);
-        Serial.print(": ");
-        Serial.println(chatHistory[i]);
+        Serial.printf("  %d: %s\n", i, chatHistory[i].c_str());
       }
     }
-    else if (cmd == "clear") {
+    else if (input == "/clear") {
       chatIndex = 0;
       Serial.println("[OK] History cleared");
     }
-    else if (cmd == "help") {
-      Serial.println("Commands:");
-      Serial.println("  send <message>  - Send message via E220");
-      Serial.println("  config          - Show current E220 config");
-      Serial.println("  history         - Show chat history");
-      Serial.println("  clear           - Clear chat history");
-      Serial.println("  help            - Show this help");
+    else if (input == "/help") {
+      Serial.println("Type anything to send it via E220.");
+      Serial.println("Slash commands:");
+      Serial.println("  /config   - Show E220 config");
+      Serial.println("  /read     - Read module registers");
+      Serial.println("  /history  - Show chat history");
+      Serial.println("  /clear    - Clear history");
+      Serial.println("  /help     - This help");
     }
     else {
-      Serial.println("[ERROR] Unknown command. Type 'help' for usage.");
+      // Everything else is a message - send it
+      e220Serial.println(input);
+      if (chatIndex < 100) {
+        chatHistory[chatIndex] = "[TX] " + input;
+        chatIndex++;
+      }
+      Serial.printf("[TX] %s\n", input.c_str());
     }
   }
 }
@@ -369,6 +632,10 @@ void setup() {
   setupE220();
   setupWiFi();
   setupWebRoutes();
+  
+  // Read current E220 config on boot
+  Serial.println("[BOOT] Reading E220 module config...");
+  readE220Config();
   
   Serial.println("[BOOT] Ready!");
 }

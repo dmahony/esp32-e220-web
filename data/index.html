@@ -355,6 +355,152 @@
       border-color: #2563eb;
     }
 
+    .button-area button.danger {
+      background: #ef4444;
+      color: white;
+      border-color: #ef4444;
+    }
+
+    .button-area button.danger:hover {
+      background: #dc2626;
+      border-color: #dc2626;
+    }
+
+    #wifi-panel {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .wifi-status-grid {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px 12px;
+      font-size: 13px;
+    }
+
+    .wifi-status-grid .label {
+      color: #6b7280;
+      font-weight: 500;
+    }
+
+    .wifi-status-grid .value {
+      color: #1a1a1a;
+      font-family: monospace;
+    }
+
+    .network-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .network-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-size: 13px;
+    }
+
+    .network-item:hover {
+      border-color: #3b82f6;
+      background: #eff6ff;
+    }
+
+    .network-ssid {
+      flex: 1;
+      font-weight: 500;
+    }
+
+    .network-meta {
+      font-size: 11px;
+      color: #9ca3af;
+    }
+
+    .signal-bars {
+      display: flex;
+      align-items: flex-end;
+      gap: 2px;
+      height: 16px;
+    }
+
+    .signal-bars .bar {
+      width: 4px;
+      background: #d1d5db;
+      border-radius: 1px;
+    }
+
+    .signal-bars .bar:nth-child(1) { height: 4px; }
+    .signal-bars .bar:nth-child(2) { height: 8px; }
+    .signal-bars .bar:nth-child(3) { height: 12px; }
+    .signal-bars .bar:nth-child(4) { height: 16px; }
+
+    .signal-bars .bar.active { background: #3b82f6; }
+
+    .lock-icon {
+      font-size: 12px;
+      color: #6b7280;
+    }
+
+    .password-wrapper {
+      position: relative;
+    }
+
+    .password-wrapper input {
+      padding-right: 40px !important;
+    }
+
+    .password-toggle {
+      position: absolute;
+      right: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      color: #6b7280;
+      padding: 4px;
+    }
+
+    .wifi-msg {
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      display: none;
+    }
+
+    .wifi-msg.info { display: block; background: #dbeafe; color: #1e40af; border: 1px solid #bfdbfe; }
+    .wifi-msg.success { display: block; background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+    .wifi-msg.error { display: block; background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+
+    .scan-btn {
+      padding: 8px 16px;
+      background: #3b82f6;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .scan-btn:hover { background: #2563eb; }
+    .scan-btn:disabled { background: #9ca3af; cursor: not-allowed; }
+
     .status {
       display: none;
       padding: 12px 16px;
@@ -432,6 +578,7 @@
     <div class="tabs">
       <button class="tab-btn active" onclick="switchTab('chat')">Chat</button>
       <button class="tab-btn" onclick="switchTab('config')">Config</button>
+      <button class="tab-btn" onclick="switchTab('wifi')">WiFi</button>
     </div>
 
     <div class="content">
@@ -447,24 +594,24 @@
       <!-- CONFIG TAB -->
       <div id="config" class="tab-content">
         <div id="config-panel">
-          <!-- BASIC SETTINGS -->
+          <!-- BASIC SETTINGS (REG 00h-04h) -->
           <div class="form-section">
             <h3>Basic Settings</h3>
             <div class="form-group">
-              <label>Frequency (MHz)</label>
+              <label>Frequency (MHz) — REG2 Channel</label>
               <select id="freq">
-                <option value="433">433 MHz</option>
-                <option value="470">470 MHz</option>
-                <option value="868">868 MHz</option>
-                <option value="915">915 MHz (US)</option>
-                <option value="930.125" selected>930.125 MHz (Standard)</option>
+                <option value="850.125">850.125 MHz (CH0)</option>
+                <option value="868.125">868.125 MHz (CH18)</option>
+                <option value="915.125">915.125 MHz (CH65)</option>
+                <option value="920.125">920.125 MHz (CH70)</option>
+                <option value="930.125" selected>930.125 MHz (CH80)</option>
               </select>
-              <div class="help-text">Or enter custom frequency (400-510 MHz)</div>
-              <input type="number" id="freq_custom" min="400" max="510" step="0.125" placeholder="Custom..." style="margin-top: 6px;">
+              <div class="help-text">900 band: 850.125 + CH MHz (CH 0-80)</div>
+              <input type="number" id="freq_custom" min="850.125" max="930.125" step="1" placeholder="Custom freq..." style="margin-top: 6px;">
             </div>
 
             <div class="form-group">
-              <label>TX Power (dBm)</label>
+              <label>TX Power — REG1[1:0]</label>
               <select id="txpower">
                 <option value="30">30 dBm (Max)</option>
                 <option value="27">27 dBm</option>
@@ -474,132 +621,139 @@
             </div>
 
             <div class="form-group">
-              <label>Serial Baud Rate</label>
-              <select id="baud">
-                <option value="1200">1200 bps</option>
-                <option value="2400">2400 bps</option>
-                <option value="4800">4800 bps</option>
-                <option value="9600" selected>9600 bps (Standard)</option>
-                <option value="19200">19200 bps</option>
-                <option value="38400">38400 bps</option>
-                <option value="57600">57600 bps</option>
-                <option value="115200">115200 bps</option>
+              <label>Air Data Rate — REG0[2:0]</label>
+              <select id="airrate">
+                <option value="2" selected>2.4 kbps (default, max range)</option>
+                <option value="3">4.8 kbps</option>
+                <option value="4">9.6 kbps</option>
+                <option value="5">19.2 kbps</option>
+                <option value="6">38.4 kbps</option>
+                <option value="7">62.5 kbps (fastest)</option>
               </select>
+              <div class="help-text">Both modules must match! Lower = longer range</div>
             </div>
 
             <div class="row">
               <div class="form-group">
-                <label>Node Address</label>
+                <label>Module Address (ADDH:ADDL)</label>
                 <input type="text" id="addr" placeholder="0x0000" maxlength="6" value="0x0000">
-                <div class="help-text">Hex format</div>
+                <div class="help-text">0xFFFF = broadcast</div>
               </div>
               <div class="form-group">
                 <label>Destination Address</label>
                 <input type="text" id="dest" placeholder="0xFFFF" maxlength="6" value="0xFFFF">
-                <div class="help-text">Target node</div>
-              </div>
-            </div>
-
-            <div class="row">
-              <div class="form-group">
-                <label>Network ID</label>
-                <input type="number" id="netid" min="0" max="255" value="0">
+                <div class="help-text">For fixed-point TX</div>
               </div>
             </div>
           </div>
 
-          <!-- ADVANCED SETTINGS -->
+          <!-- ADVANCED SETTINGS (REG0-REG3, CRYPT) -->
           <div class="form-section">
             <h3>Advanced Settings</h3>
-            <div class="form-group">
-              <label>Air Data Rate</label>
-              <select id="airrate">
-                <option value="0">2.4k bps</option>
-                <option value="1">4.8k bps</option>
-                <option value="2">9.6k bps</option>
-                <option value="3">19.2k bps</option>
-                <option value="4" selected>38.4k bps (Standard)</option>
-                <option value="5">62.5k bps</option>
-              </select>
-            </div>
-
-            <div class="form-group">
-              <label>Packet Size</label>
-              <select id="pktsize">
-                <option value="0" selected>240 bytes</option>
-                <option value="1">128 bytes</option>
-                <option value="2">64 bytes</option>
-                <option value="3">32 bytes</option>
-              </select>
-            </div>
 
             <div class="row">
               <div class="form-group">
-                <label>RX Timeout (ms)</label>
-                <input type="number" id="rxtmo" min="0" max="65535" value="1000">
-              </div>
-              <div class="form-group">
-                <label>TX Wait Time (ms)</label>
-                <input type="number" id="txwait" min="0" max="1000" value="0">
-              </div>
-            </div>
-
-            <div class="form-group">
-              <label>Subpacket Size</label>
-              <select id="subpkt">
-                <option value="0">200 bytes</option>
-                <option value="1" selected>128 bytes</option>
-                <option value="2">64 bytes</option>
-                <option value="3">32 bytes</option>
-              </select>
-            </div>
-
-            <div class="form-group">
-              <label>RSSI Noise (dBm)</label>
-              <input type="number" id="rssi" min="-120" max="-80" value="-100">
-            </div>
-
-            <div class="row">
-              <div class="form-group">
-                <label>CRC</label>
-                <select id="crc">
-                  <option value="0">Disabled</option>
-                  <option value="1" selected>Enabled</option>
+                <label>Serial Baud Rate — REG0[7:5]</label>
+                <select id="baud">
+                  <option value="1200">1200</option>
+                  <option value="2400">2400</option>
+                  <option value="4800">4800</option>
+                  <option value="9600" selected>9600 (default)</option>
+                  <option value="19200">19200</option>
+                  <option value="38400">38400</option>
+                  <option value="57600">57600</option>
+                  <option value="115200">115200</option>
                 </select>
               </div>
               <div class="form-group">
-                <label>Repeater</label>
-                <select id="repeater">
-                  <option value="0" selected>Disabled</option>
+                <label>UART Parity — REG0[4:3]</label>
+                <select id="parity">
+                  <option value="0" selected>8N1 (default)</option>
+                  <option value="1">8O1</option>
+                  <option value="2">8E1</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="form-group">
+                <label>Subpacket Size — REG1[7:6]</label>
+                <select id="subpkt">
+                  <option value="0" selected>200 bytes (default)</option>
+                  <option value="1">128 bytes</option>
+                  <option value="2">64 bytes</option>
+                  <option value="3">32 bytes</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>TX Mode — REG3[6]</label>
+                <select id="txmode">
+                  <option value="0" selected>Transparent (default)</option>
+                  <option value="1">Fixed-point</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="form-group">
+                <label>RSSI Ambient Noise — REG1[5]</label>
+                <select id="rssi_noise">
+                  <option value="0" selected>Disabled (default)</option>
                   <option value="1">Enabled</option>
                 </select>
               </div>
+              <div class="form-group">
+                <label>RSSI Byte — REG3[7]</label>
+                <select id="rssi_byte">
+                  <option value="0" selected>Disabled (default)</option>
+                  <option value="1">Append RSSI to RX</option>
+                </select>
+              </div>
             </div>
 
             <div class="row">
               <div class="form-group">
-                <label>UART Parity</label>
-                <select id="parity">
-                  <option value="0" selected>None</option>
-                  <option value="1">Odd</option>
-                  <option value="2">Even</option>
+                <label>LBT (Listen Before Talk) — REG3[4]</label>
+                <select id="lbt">
+                  <option value="0" selected>Disabled (default)</option>
+                  <option value="1">Enabled</option>
                 </select>
               </div>
               <div class="form-group">
-                <label>TX Mode</label>
-                <select id="txmode">
-                  <option value="0" selected>Transparent</option>
-                  <option value="1">Fixed</option>
+                <label>WOR Cycle — REG3[2:0]</label>
+                <select id="wor_cycle">
+                  <option value="0">500 ms</option>
+                  <option value="1">1000 ms</option>
+                  <option value="2">1500 ms</option>
+                  <option value="3" selected>2000 ms (default)</option>
+                  <option value="4">2500 ms</option>
+                  <option value="5">3000 ms</option>
+                  <option value="6">3500 ms</option>
+                  <option value="7">4000 ms</option>
                 </select>
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="form-group">
+                <label>Encryption Key High — REG6</label>
+                <input type="number" id="crypt_h" min="0" max="255" value="0">
+                <div class="help-text">0-255 (write-only)</div>
+              </div>
+              <div class="form-group">
+                <label>Encryption Key Low — REG7</label>
+                <input type="number" id="crypt_l" min="0" max="255" value="0">
+                <div class="help-text">Both modules must match</div>
               </div>
             </div>
 
             <div class="form-group">
               <label>Save Type</label>
               <select id="savetype">
-                <option value="0" selected>Save to RAM</option>
-                <option value="1">Save to EEPROM</option>
+                <option value="0">Save to RAM (temporary)</option>
+                <option value="1" selected>Save to Flash (permanent)</option>
               </select>
+              <div class="help-text">Flash = survives power cycle</div>
             </div>
           </div>
 
@@ -607,9 +761,71 @@
         </div>
 
         <div class="button-area">
-          <button onclick="resetForm()">Reset</button>
+          <button onclick="resetForm()">Reset Form</button>
+          <button onclick="rebootESP()" style="background:#ef4444;color:white;border-color:#ef4444;">Restart ESP32</button>
           <button onclick="saveConfig()">Save Configuration</button>
           <button class="primary" onclick="quickSave()">Quick Save</button>
+        </div>
+      </div>
+
+      <!-- WIFI TAB -->
+      <div id="wifi" class="tab-content">
+        <div id="wifi-panel">
+          <div class="form-section">
+            <h3>Connection Status</h3>
+            <div id="wifi-status" class="wifi-status-grid">
+              <span class="label">Mode:</span><span class="value" id="ws-mode">--</span>
+              <span class="label">AP SSID:</span><span class="value" id="ws-ap-ssid">--</span>
+              <span class="label">AP IP:</span><span class="value" id="ws-ap-ip">--</span>
+              <span class="label" id="ws-sta-label-ssid" style="display:none">STA SSID:</span><span class="value" id="ws-sta-ssid" style="display:none">--</span>
+              <span class="label" id="ws-sta-label-ip" style="display:none">STA IP:</span><span class="value" id="ws-sta-ip" style="display:none">--</span>
+              <span class="label" id="ws-sta-label-rssi" style="display:none">STA RSSI:</span><span class="value" id="ws-sta-rssi" style="display:none">--</span>
+            </div>
+          </div>
+
+          <div class="form-section">
+            <h3>Available Networks</h3>
+            <div style="margin-bottom:10px"><button class="scan-btn" id="scan-btn" onclick="wifiScan()">Scan Networks</button></div>
+            <div id="network-list" class="network-list"></div>
+          </div>
+
+          <div class="form-section">
+            <h3>Connect to Network</h3>
+            <div class="form-group">
+              <label>SSID</label>
+              <input type="text" id="wifi-ssid" placeholder="Network name">
+            </div>
+            <div class="form-group">
+              <label>Password</label>
+              <div class="password-wrapper">
+                <input type="password" id="wifi-pass" placeholder="Network password">
+                <button class="password-toggle" onclick="togglePass('wifi-pass',this)" type="button">Show</button>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <button class="scan-btn" onclick="wifiConnect()">Connect</button>
+              <button class="scan-btn" id="disconnect-btn" onclick="wifiDisconnect()" style="background:#ef4444;display:none">Disconnect</button>
+            </div>
+          </div>
+
+          <div class="form-section">
+            <h3>AP Settings</h3>
+            <div class="form-group">
+              <label>AP SSID</label>
+              <input type="text" id="ap-ssid" placeholder="Access point name">
+            </div>
+            <div class="form-group">
+              <label>AP Password</label>
+              <div class="password-wrapper">
+                <input type="password" id="ap-pass" placeholder="Min 8 characters">
+                <button class="password-toggle" onclick="togglePass('ap-pass',this)" type="button">Show</button>
+              </div>
+              <div class="help-text">Requires reboot to take effect</div>
+            </div>
+            <div style="margin-top:8px"><button class="scan-btn" onclick="wifiSaveAP()">Save AP Settings</button></div>
+          </div>
+
+          <div id="wifi-msg" class="wifi-msg"></div>
         </div>
       </div>
     </div>
@@ -687,17 +903,16 @@
         baud: parseInt(document.getElementById('baud').value),
         addr: document.getElementById('addr').value,
         dest: document.getElementById('dest').value,
-        netid: parseInt(document.getElementById('netid').value),
         airrate: parseInt(document.getElementById('airrate').value),
-        pktsize: parseInt(document.getElementById('pktsize').value),
-        rxtmo: parseInt(document.getElementById('rxtmo').value),
-        txwait: parseInt(document.getElementById('txwait').value),
         subpkt: parseInt(document.getElementById('subpkt').value),
-        rssi: parseInt(document.getElementById('rssi').value),
-        crc: parseInt(document.getElementById('crc').value),
-        repeater: parseInt(document.getElementById('repeater').value),
         parity: parseInt(document.getElementById('parity').value),
         txmode: parseInt(document.getElementById('txmode').value),
+        rssi_noise: parseInt(document.getElementById('rssi_noise').value),
+        rssi_byte: parseInt(document.getElementById('rssi_byte').value),
+        lbt: parseInt(document.getElementById('lbt').value),
+        wor_cycle: parseInt(document.getElementById('wor_cycle').value),
+        crypt_h: parseInt(document.getElementById('crypt_h').value),
+        crypt_l: parseInt(document.getElementById('crypt_l').value),
         savetype: parseInt(document.getElementById('savetype').value)
       };
 
@@ -735,6 +950,153 @@
       });
     }
 
+    function rebootESP() {
+      if (!confirm('Restart ESP32? You will need to reconnect to WiFi.')) return;
+      const status = document.getElementById('status');
+      status.textContent = '⟳ Restarting ESP32...';
+      status.className = 'status success';
+      fetch('/api/reboot', { method: 'POST' })
+        .then(() => {
+          status.textContent = '⟳ ESP32 is restarting. Reconnect to WiFi in ~5 seconds...';
+        })
+        .catch(() => {
+          status.textContent = '⟳ ESP32 is restarting. Reconnect to WiFi in ~5 seconds...';
+        });
+    }
+
+    // WiFi functions
+    function togglePass(id, btn) {
+      const inp = document.getElementById(id);
+      if (inp.type === 'password') { inp.type = 'text'; btn.textContent = 'Hide'; }
+      else { inp.type = 'password'; btn.textContent = 'Show'; }
+    }
+
+    function wifiMsg(text, type) {
+      const el = document.getElementById('wifi-msg');
+      el.textContent = text;
+      el.className = 'wifi-msg ' + type;
+      if (type === 'success' || type === 'info') setTimeout(() => { el.className = 'wifi-msg'; }, 5000);
+    }
+
+    function signalBars(rssi) {
+      let bars = 0;
+      if (rssi > -50) bars = 4;
+      else if (rssi > -60) bars = 3;
+      else if (rssi > -70) bars = 2;
+      else if (rssi > -80) bars = 1;
+      let html = '<div class="signal-bars">';
+      for (let i = 1; i <= 4; i++) html += '<div class="bar' + (i <= bars ? ' active' : '') + '"></div>';
+      return html + '</div>';
+    }
+
+    function wifiStatus() {
+      fetch('/api/wifi/status').then(r => r.json()).then(d => {
+        document.getElementById('ws-mode').textContent = d.mode;
+        document.getElementById('ws-ap-ssid').textContent = d.ap_ssid;
+        document.getElementById('ws-ap-ip').textContent = d.ap_ip;
+        const staFields = ['ssid','ip','rssi'];
+        const show = d.sta_connected;
+        staFields.forEach(f => {
+          document.getElementById('ws-sta-label-'+f).style.display = show ? '' : 'none';
+          document.getElementById('ws-sta-'+f).style.display = show ? '' : 'none';
+        });
+        if (show) {
+          document.getElementById('ws-sta-ssid').textContent = d.sta_ssid;
+          document.getElementById('ws-sta-ip').textContent = d.sta_ip;
+          document.getElementById('ws-sta-rssi').textContent = d.sta_rssi + ' dBm';
+        }
+        document.getElementById('disconnect-btn').style.display = show ? '' : 'none';
+        document.getElementById('ap-ssid').placeholder = d.ap_ssid;
+      }).catch(() => {});
+    }
+
+    function wifiScan() {
+      const btn = document.getElementById('scan-btn');
+      const list = document.getElementById('network-list');
+      btn.disabled = true;
+      btn.textContent = 'Scanning...';
+      list.innerHTML = '<div style="color:#9ca3af;font-size:13px;padding:8px">Scanning for networks...</div>';
+      fetch('/api/wifi/scan').then(r => r.json()).then(d => {
+        list.innerHTML = '';
+        if (!d.networks || d.networks.length === 0) {
+          list.innerHTML = '<div style="color:#9ca3af;font-size:13px;padding:8px">No networks found</div>';
+        } else {
+          d.networks.forEach(n => {
+            const item = document.createElement('div');
+            item.className = 'network-item';
+            item.onclick = () => { document.getElementById('wifi-ssid').value = n.ssid; };
+            item.innerHTML = signalBars(n.rssi) +
+              (n.encryption !== 'Open' ? '<span class="lock-icon">&#x1F512;</span>' : '') +
+              '<span class="network-ssid">' + n.ssid + '</span>' +
+              '<span class="network-meta">CH' + n.channel + ' ' + n.rssi + 'dBm</span>';
+            list.appendChild(item);
+          });
+        }
+      }).catch(() => {
+        list.innerHTML = '<div style="color:#991b1b;font-size:13px;padding:8px">Scan failed</div>';
+      }).finally(() => {
+        btn.disabled = false;
+        btn.textContent = 'Scan Networks';
+      });
+    }
+
+    function wifiConnect() {
+      const ssid = document.getElementById('wifi-ssid').value.trim();
+      const pass = document.getElementById('wifi-pass').value;
+      if (!ssid) { wifiMsg('Enter an SSID', 'error'); return; }
+      wifiMsg('Connecting to ' + ssid + '...', 'info');
+      fetch('/api/wifi/connect', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ssid: ssid, password: pass})
+      }).then(r => r.json()).then(d => {
+        if (d.status === 'connected') {
+          wifiMsg('Connected! IP: ' + d.ip, 'success');
+        } else {
+          wifiMsg('Connection failed. Check credentials.', 'error');
+        }
+        wifiStatus();
+      }).catch(() => wifiMsg('Network error', 'error'));
+    }
+
+    function wifiDisconnect() {
+      wifiMsg('Disconnecting...', 'info');
+      fetch('/api/wifi/disconnect', {method:'POST'}).then(r => r.json()).then(() => {
+        wifiMsg('Disconnected', 'success');
+        wifiStatus();
+      }).catch(() => wifiMsg('Error', 'error'));
+    }
+
+    function wifiSaveAP() {
+      const ssid = document.getElementById('ap-ssid').value.trim();
+      const pass = document.getElementById('ap-pass').value;
+      if (!ssid && !pass) { wifiMsg('Enter AP SSID or password', 'error'); return; }
+      if (pass && pass.length < 8) { wifiMsg('AP password must be at least 8 characters', 'error'); return; }
+      const body = {};
+      if (ssid) body.ssid = ssid;
+      if (pass) body.password = pass;
+      fetch('/api/wifi/ap', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)
+      }).then(r => r.json()).then(d => {
+        wifiMsg('AP settings saved. Reboot to apply.', 'success');
+      }).catch(() => wifiMsg('Error saving AP settings', 'error'));
+    }
+
+    // Auto-refresh wifi status when tab is active
+    let wifiInterval = null;
+    const origSwitchTab = switchTab;
+    switchTab = function(tabName) {
+      origSwitchTab(tabName);
+      if (tabName === 'wifi') {
+        wifiStatus();
+        if (!wifiInterval) wifiInterval = setInterval(wifiStatus, 5000);
+      } else {
+        if (wifiInterval) { clearInterval(wifiInterval); wifiInterval = null; }
+      }
+    };
+
     // Load config on startup
     fetch('/api/config')
       .then(r => r.json())
@@ -742,22 +1104,21 @@
         if (data.config) {
           const c = data.config;
           document.getElementById('freq').value = c.freq || 930.125;
-          document.getElementById('txpower').value = c.txpower || 0;
+          document.getElementById('txpower').value = c.txpower || 21;
           document.getElementById('baud').value = c.baud || 9600;
           document.getElementById('addr').value = c.addr || '0x0000';
           document.getElementById('dest').value = c.dest || '0xFFFF';
-          document.getElementById('netid').value = c.netid || 0;
-          document.getElementById('airrate').value = c.airrate || 4;
-          document.getElementById('pktsize').value = c.pktsize || 0;
-          document.getElementById('rxtmo').value = c.rxtmo || 1000;
-          document.getElementById('txwait').value = c.txwait || 0;
-          document.getElementById('subpkt').value = c.subpkt || 1;
-          document.getElementById('rssi').value = c.rssi || -100;
-          document.getElementById('crc').value = c.crc || 1;
-          document.getElementById('repeater').value = c.repeater || 0;
+          document.getElementById('airrate').value = c.airrate || 2;
+          document.getElementById('subpkt').value = c.subpkt || 0;
           document.getElementById('parity').value = c.parity || 0;
           document.getElementById('txmode').value = c.txmode || 0;
-          document.getElementById('savetype').value = c.savetype || 0;
+          document.getElementById('rssi_noise').value = c.rssi_noise || 0;
+          document.getElementById('rssi_byte').value = c.rssi_byte || 0;
+          document.getElementById('lbt').value = c.lbt || 0;
+          document.getElementById('wor_cycle').value = c.wor_cycle || 3;
+          document.getElementById('crypt_h').value = c.crypt_h || 0;
+          document.getElementById('crypt_l').value = c.crypt_l || 0;
+          document.getElementById('savetype').value = c.savetype || 1;
         }
       });
   </script>
