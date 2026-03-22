@@ -538,14 +538,15 @@ void setupWebRoutes() {
     }
   });
 
-  // Chat history API
+  // Chat history API - uses ArduinoJson for proper escaping
   server.on("/api/chat", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String json = "{\"history\":[";
+    DynamicJsonDocument doc(8192);
+    JsonArray history = doc.createNestedArray("history");
     for (int i = 0; i < chatIndex; i++) {
-      json += "\"" + chatHistory[i] + "\"";
-      if (i < chatIndex - 1) json += ",";
+      history.add(chatHistory[i]);
     }
-    json += "]}";
+    String json;
+    serializeJson(doc, json);
     request->send(200, "application/json", json);
   });
 
