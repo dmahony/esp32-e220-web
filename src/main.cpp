@@ -746,17 +746,42 @@ void setupWebRoutes() {
   Serial.println("[Web] Server on 192.168.4.1");
 }
 
+// RX buffer for reassembling large incoming messages
+static String rxBuffer = "";
+static unsigned long lastRxTime = 0;
+// If no new data for this many ms, flush whatever we have as a complete message
+#define RX_FLUSH_TIMEOUT 2000
+
 void handleE220Serial() {
   while (e220Serial.available()) {
-    String line = e220Serial.readStringUntil('\n');
-    line.trim();
+    char c = (char)e220Serial.read();
+    lastRxTime = millis();
     
-    if (line.length() > 0 && chatIndex < 100) {
-      chatHistory[chatIndex] = "[RX] " + line;
-      chatIndex++;
-      Serial.print("[RX] ");
-      Serial.println(line);
+    if (c == '\n') {
+      // Newline = end of message
+      rxBuffer.trim();
+      if (rxBuffer.length() > 0 && chatIndex < 100) {
+        chatHistory[chatIndex] = "[RX] " + rxBuffer;
+        chatIndex++;
+        Serial.printf("[RX] (%d bytes) ", rxBuffer.length());
+        Serial.println(rxBuffer);
+      }
+      rxBuffer = "";
+    } else {
+      rxBuffer += c;
     }
+  }
+  
+  // Flush partial buffer after timeout (in case sender didn't send newline)
+  if (rxBuffer.length() > 0 && (millis() - lastRxTime) > RX_FLUSH_TIMEOUT) {
+    rxBuffer.trim();
+    if (rxBuffer.length() > 0 && chatIndex < 100) {
+      chatHistory[chatIndex] = "[RX] " + rxBuffer;
+      chatIndex++;
+      Serial.printf("[RX] (%d bytes, timeout flush) ", rxBuffer.length());
+      Serial.println(rxBuffer);
+    }
+    rxBuffer = "";
   }
 }
 
