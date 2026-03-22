@@ -283,16 +283,27 @@ void applyE220Config() {
   Serial.printf("  REG3=0x%02X: rssi_byte=%d txmode=%s lbt=%d wor=%d\n", reg3, e220_config.rssi_byte, e220_config.txmode ? "FIXED" : "TRANSPARENT", e220_config.lbt, e220_config.wor_cycle);
   Serial.printf("  CRYPT=0x%02X%02X\n", crypt_h, crypt_l);
   
+  Serial.printf("[E220] Sending %d bytes: ", 11);
+  for (int i = 0; i < 11; i++) Serial.printf("%02X ", packet[i]);
+  Serial.println();
+  
   e220Serial.write(packet, 11);
   e220Serial.flush();
   
+  // Wait for AUX to indicate processing, then ready
+  delay(100);
+  waitE220Ready(2000);
   delay(200);
   
   // Read response: E220 echoes C1 + start + len + data
+  uint32_t respTimeout = millis() + 1000;
+  while (e220Serial.available() < 3 && millis() < respTimeout) {
+    delay(10);
+  }
+  
   int avail = e220Serial.available();
   if (avail > 0) {
     Serial.printf("[E220] Response (%d bytes):", avail);
-    bool ok = false;
     uint8_t first = 0;
     while(e220Serial.available()) {
       uint8_t b = e220Serial.read();
@@ -745,11 +756,34 @@ void handleUSBSerial() {
       chatIndex = 0;
       Serial.println("[OK] History cleared");
     }
+    else if (input == "/factory") {
+      Serial.println("[E220] Restoring factory defaults (900MHz: addr=0, ch=80, 9600 8N1, air 2.4k, 21dBm)...");
+      e220_config.freq = 930.125;
+      e220_config.txpower = 21;
+      e220_config.baud = 9600;
+      strlcpy(e220_config.addr, "0x0000", sizeof(e220_config.addr));
+      strlcpy(e220_config.dest, "0xFFFF", sizeof(e220_config.dest));
+      e220_config.airrate = 2;
+      e220_config.subpkt = 0;
+      e220_config.parity = 0;
+      e220_config.txmode = 0;
+      e220_config.rssi_noise = 0;
+      e220_config.rssi_byte = 0;
+      e220_config.lbt = 0;
+      e220_config.wor_cycle = 3;
+      e220_config.crypt_h = 0;
+      e220_config.crypt_l = 0;
+      e220_config.savetype = 1;
+      applyE220Config();
+      delay(500);
+      readE220Config();
+    }
     else if (input == "/help") {
       Serial.println("Type anything to send it via E220.");
       Serial.println("Slash commands:");
       Serial.println("  /config   - Show E220 config");
       Serial.println("  /read     - Read module registers");
+      Serial.println("  /factory  - Restore factory defaults");
       Serial.println("  /history  - Show chat history");
       Serial.println("  /clear    - Clear history");
       Serial.println("  /help     - This help");
