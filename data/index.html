@@ -852,18 +852,40 @@
     function sendMsg() {
       const input = document.getElementById('msgInput');
       const msg = input.value.trim();
-      if (!msg) return;
+      if (!msg) {
+        alert('Please enter a message');
+        return;
+      }
+
+      // Disable button during send
+      const btn = event.target;
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Sending...';
 
       // TX debug info comes from firmware via /api/debug
-
       fetch('/api/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: msg })
-      });
-
-      input.value = '';
-      input.focus();
+      })
+        .then(r => {
+          if (!r.ok) return r.json().then(d => Promise.reject(d));
+          return r.json();
+        })
+        .then(data => {
+          input.value = '';
+          input.focus();
+        })
+        .catch(err => {
+          const errorMsg = err.error || err.message || 'Failed to send message';
+          alert('Error: ' + errorMsg);
+          console.error('Send error:', err);
+        })
+        .finally(() => {
+          btn.disabled = false;
+          btn.textContent = originalText;
+        });
     }
 
     function addMsg(text, type) {
@@ -928,26 +950,38 @@
         savetype: parseInt(document.getElementById('savetype').value)
       };
 
+      // Validate frequency range before sending
+      if (config.freq < 850.125 || config.freq > 930.125) {
+        const status = document.getElementById('status');
+        status.textContent = '✗ Invalid frequency: must be 850.125-930.125 MHz';
+        status.className = 'status error';
+        return;
+      }
+
+      const status = document.getElementById('status');
+      status.textContent = '⟳ Saving configuration...';
+      status.className = 'status success';
+
       fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config)
       })
-        .then(r => r.json())
-        .then(data => {
-          const status = document.getElementById('status');
-          if (data.status === 'ok') {
-            status.textContent = '✓ Configuration saved successfully';
-            status.className = 'status success';
-          } else {
-            status.textContent = '✗ Error: ' + (data.error || 'Unknown error');
-            status.className = 'status error';
-          }
+        .then(r => {
+          if (!r.ok) return r.json().then(d => Promise.reject(d));
+          return r.json();
         })
-        .catch(e => {
-          const status = document.getElementById('status');
-          status.textContent = '✗ Network error';
+        .then(data => {
+          status.textContent = '✓ Configuration saved and applied to E220 module';
+          status.className = 'status success';
+          // Auto-hide after 5 seconds
+          setTimeout(() => { status.className = 'status'; }, 5000);
+        })
+        .catch(err => {
+          const errorMsg = err.error || err.message || 'Failed to save configuration';
+          status.textContent = '✗ Error: ' + errorMsg;
           status.className = 'status error';
+          console.error('Config save error:', err);
         });
     }
 
@@ -1082,18 +1116,40 @@
     function wifiSaveAP() {
       const ssid = document.getElementById('ap-ssid').value.trim();
       const pass = document.getElementById('ap-pass').value;
-      if (!ssid && !pass) { wifiMsg('Enter AP SSID or password', 'error'); return; }
-      if (pass && pass.length < 8) { wifiMsg('AP password must be at least 8 characters', 'error'); return; }
+      
+      if (!ssid && !pass) {
+        wifiMsg('Enter AP SSID or password', 'error');
+        return;
+      }
+      
+      if (pass && pass.length < 8) {
+        wifiMsg('AP password must be at least 8 characters', 'error');
+        return;
+      }
+      
       const body = {};
       if (ssid) body.ssid = ssid;
       if (pass) body.password = pass;
+      
+      wifiMsg('Saving AP settings...', 'info');
+      
       fetch('/api/wifi/ap', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(body)
-      }).then(r => r.json()).then(d => {
-        wifiMsg('AP settings saved. Reboot to apply.', 'success');
-      }).catch(() => wifiMsg('Error saving AP settings', 'error'));
+      })
+        .then(r => {
+          if (!r.ok) return r.json().then(d => Promise.reject(d));
+          return r.json();
+        })
+        .then(d => {
+          wifiMsg('✓ AP settings saved. Reboot to apply new settings.', 'success');
+        })
+        .catch(err => {
+          const errorMsg = err.error || err.message || 'Error saving AP settings';
+          wifiMsg('✗ ' + errorMsg, 'error');
+          console.error('AP save error:', err);
+        });
     }
 
     // Auto-refresh wifi status when tab is active
