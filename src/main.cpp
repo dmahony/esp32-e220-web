@@ -1,3 +1,29 @@
+/**
+ * ESP32 E220 LoRa Web Chat & Configuration
+ * 
+ * A dual-device LoRa messaging system using:
+ * - ESP32 DevKit microcontroller
+ * - Ebyte E220-900T22S 900MHz LoRa modules
+ * - Web UI for chat and configuration
+ * - Serial terminal for advanced commands
+ * 
+ * Features:
+ * - LoRa messaging between two devices
+ * - Web interface with Chat, Config, WiFi, and Debug tabs
+ * - Real-time E220 register configuration
+ * - Persistent flash storage
+ * - Serial command interface
+ * 
+ * Hardware Wiring:
+ * E220 RX -> GPIO21 (UART2 RX)
+ * E220 TX -> GPIO22 (UART2 TX)
+ * E220 M0 -> GPIO2 (Mode control)
+ * E220 M1 -> GPIO19 (Mode control)
+ * E220 AUX -> GPIO4 (Status input)
+ * E220 VCC -> 3.3V (with 10µF capacitor)
+ * E220 GND -> GND
+ */
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <AsyncTCP.h>
@@ -6,13 +32,16 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 
-#define E220_RX_PIN   21
-#define E220_TX_PIN   22
-#define E220_M0_PIN   2
-#define E220_M1_PIN   19
-#define E220_AUX_PIN  4
-#define UART_BAUD_CONFIG  9600    // E220 config mode always uses 9600
-#define UART_BAUD_NORMAL  9600    // Normal mode baud rate (match config mode for simplicity)
+// GPIO Pin assignments for E220 module
+#define E220_RX_PIN   21              // UART2 RX from E220
+#define E220_TX_PIN   22              // UART2 TX to E220
+#define E220_M0_PIN   2               // Mode pin 0 (low = normal, high = config/sleep)
+#define E220_M1_PIN   19              // Mode pin 1 (low = normal, high = config/sleep)
+#define E220_AUX_PIN  4               // Status pin (high = ready, low = busy)
+
+// UART Configuration
+#define UART_BAUD_CONFIG  9600        // E220 config mode ONLY supports 9600 8N1
+#define UART_BAUD_NORMAL  9600        // Normal mode baud rate (E220 operational)
 
 AsyncWebServer server(80);
 Preferences preferences;
@@ -28,27 +57,40 @@ HardwareSerial e220Serial(2);
 String chatHistory[100];
 int chatIndex = 0;
 
-// Validation helper functions for configuration parameters
+/**
+ * Validation Helper Functions
+ * 
+ * These functions validate configuration parameters before applying them
+ * to the E220 module. This prevents invalid configurations from being
+ * written to flash, which would require hardware reset.
+ */
+
+// Validate frequency is in supported range (850.125 - 930.125 MHz, 900MHz band)
 bool isValidFrequency(float freq) {
   return freq >= 850.125f && freq <= 930.125f;
 }
 
+// Validate TX power is one of the supported hardware values (30/27/24/21 dBm)
 bool isValidTxPower(int power) {
   return power == 30 || power == 27 || power == 24 || power == 21;
 }
 
+// Validate air data rate code (0-7 maps to 2.4k/4.8k/9.6k/19.2k/38.4k/62.5k kbps)
 bool isValidAirRate(int rate) {
   return rate >= 0 && rate <= 7;
 }
 
+// Validate subpacket size code (0-3 maps to 200/128/64/32 bytes)
 bool isValidSubPacketSize(int size) {
   return size >= 0 && size <= 3;
 }
 
+// Validate WOR (Wake-On-Radio) cycle code (0-7 maps to 500ms-4000ms)
 bool isValidWORCycle(int cycle) {
   return cycle >= 0 && cycle <= 7;
 }
 
+// Validate serial baud rate (must be one of 8 supported values)
 bool isValidBaud(int baud) {
   static const int baudTable[] = {1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200};
   for (int i = 0; i < 8; i++) {
@@ -100,26 +142,82 @@ DebugPrint dbg;
 String txQueue = "";
 bool txPending = false;
 
-// E220 Config - matches actual E220 registers (00h-07h)
-// See E220-xxxTxxx_UserManual_EN.pdf Section 6.2-6.3
+/**
+ * E220 Configuration Structure
+ * 
+ * Maps directly to E220-900 LoRa module hardware registers (00h-07h).
+ * Matches E220 datasheet Section 6.2-6.3.
+ * 
+ * When modified, values are written to the E220 in CONFIG mode (M0=1, M1=1).
+ * Some values are persistent (written to flash), others are RAM-only.
+ */
 struct {
-  float freq;        // Derived from REG2 channel: 850.125 + CH (900MHz band)
-  int txpower;       // REG1[1:0]: 30=0x00, 27=0x01, 24=0x02, 21=0x03 (for 30dBm models)
-  int baud;          // REG0[7:5]: 1200-115200
-  char addr[8];      // ADDH(00h) + ADDL(01h): module address "0xHHLL"
-  char dest[8];      // Destination for fixed-point TX (not a register, used in TX prefix)
-  int airrate;       // REG0[2:0]: 0-2=2.4k, 3=4.8k, 4=9.6k, 5=19.2k, 6=38.4k, 7=62.5k
-  int subpkt;        // REG1[7:6]: 0=200B, 1=128B, 2=64B, 3=32B
-  int parity;        // REG0[4:3]: 0=8N1, 1=8O1, 2=8E1
-  int txmode;        // REG3[6]: 0=transparent, 1=fixed-point
-  int rssi_noise;    // REG1[5]: 0=disabled, 1=enable ambient noise RSSI
-  int rssi_byte;     // REG3[7]: 0=disabled, 1=append RSSI byte to RX data
-  int lbt;           // REG3[4]: 0=disabled, 1=listen-before-talk
-  int wor_cycle;     // REG3[2:0]: period = (1+WOR)*500ms, 0=500ms..7=4000ms
-  int crypt_h;       // REG 06h: encryption key high byte (write-only)
-  int crypt_l;       // REG 07h: encryption key low byte (write-only)
-  int savetype;      // 0=C2 (RAM only), 1=C0 (save to flash)
-} e220_config = {930.125, 21, 9600, "0x0000", "0xFFFF", 2, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0};
+  // Frequency (MHz) - derived from REG2 (channel): 850.125 + CH, where CH=0-80 (900MHz band)
+  float freq;
+  
+  // TX Power (dBm) - REG1[1:0]: hardware-dependent, typical 30/27/24/21 dBm
+  int txpower;
+  
+  // Serial baud rate (bps) - REG0[7:5]: must match ESP32 UART speed in normal mode
+  int baud;
+  
+  // Module address - ADDH(00h) + ADDL(01h): "0xHHLL" format, used for filtering RX
+  char addr[8];
+  
+  // Destination address - for fixed-point TX mode (not a register, user config only)
+  char dest[8];
+  
+  // Air data rate - REG0[2:0]: 0=2.4k, 1=4.8k, 2=9.6k(default), 3=19.2k, 4=38.4k, 5=62.5k
+  int airrate;
+  
+  // Subpacket size - REG1[7:6]: 0=200B(default), 1=128B, 2=64B, 3=32B
+  int subpkt;
+  
+  // UART parity - REG0[4:3]: 0=8N1(default), 1=8O1, 2=8E1
+  int parity;
+  
+  // TX mode - REG3[6]: 0=transparent(default), 1=fixed-point addressing
+  int txmode;
+  
+  // RSSI ambient noise - REG1[5]: 0=disabled(default), 1=enable ambient noise RSSI reporting
+  int rssi_noise;
+  
+  // RSSI byte in RX - REG3[7]: 0=disabled(default), 1=append RSSI dBm byte to RX data
+  int rssi_byte;
+  
+  // Listen Before Talk - REG3[4]: 0=disabled(default), 1=enable LBT to reduce collisions
+  int lbt;
+  
+  // Wake-On-Radio cycle - REG3[2:0]: period = (1+WOR)*500ms, 0=500ms..7=4000ms
+  int wor_cycle;
+  
+  // Encryption key high byte - REG06h (write-only, not readable, key persists in flash)
+  int crypt_h;
+  
+  // Encryption key low byte - REG07h (write-only, not readable, key persists in flash)
+  int crypt_l;
+  
+  // Save type - 0=C2(RAM only), 1=C0(save to flash, survives reboot)
+  int savetype;
+  
+} e220_config = {
+  930.125,  // freq: 930.125 MHz (CH80, end of band)
+  21,       // txpower: 21 dBm
+  9600,     // baud: 9600 bps
+  "0x0000", // addr: default address
+  "0xFFFF", // dest: broadcast
+  2,        // airrate: 9.6 kbps (good range/speed balance)
+  0,        // subpkt: 200 bytes (default)
+  0,        // parity: 8N1 (default)
+  0,        // txmode: transparent (default)
+  0,        // rssi_noise: disabled
+  0,        // rssi_byte: disabled
+  0,        // lbt: disabled
+  3,        // wor_cycle: 2000ms period (1+3)*500
+  0,        // crypt_h: no encryption
+  0,        // crypt_l: no encryption
+  0         // savetype: RAM only (0=C2)
+};
 
 void setE220Mode(uint8_t mode) {
   if (mode == 1) {
