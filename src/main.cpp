@@ -28,6 +28,35 @@ HardwareSerial e220Serial(2);
 String chatHistory[100];
 int chatIndex = 0;
 
+// Validation helper functions for configuration parameters
+bool isValidFrequency(float freq) {
+  return freq >= 850.125f && freq <= 930.125f;
+}
+
+bool isValidTxPower(int power) {
+  return power == 30 || power == 27 || power == 24 || power == 21;
+}
+
+bool isValidAirRate(int rate) {
+  return rate >= 0 && rate <= 7;
+}
+
+bool isValidSubPacketSize(int size) {
+  return size >= 0 && size <= 3;
+}
+
+bool isValidWORCycle(int cycle) {
+  return cycle >= 0 && cycle <= 7;
+}
+
+bool isValidBaud(int baud) {
+  static const int baudTable[] = {1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200};
+  for (int i = 0; i < 8; i++) {
+    if (baudTable[i] == baud) return true;
+  }
+  return false;
+}
+
 // Debug log ring buffer - captures Serial output for web debug tab
 #define DEBUG_LOG_SIZE 4096
 char debugLogBuf[DEBUG_LOG_SIZE];
@@ -577,16 +606,27 @@ void setupWebRoutes() {
       return;
     }
     
+    // Validate message length
+    if (msg.length() == 0) {
+      request->send(400, "application/json", "{\"error\":\"Message cannot be empty\"}");
+      return;
+    }
+    
+    if (msg.length() > 2000) {
+      request->send(413, "application/json", "{\"error\":\"Message too large (max 2000 bytes)\"}");
+      dbg.printf("[TX] Message rejected: %d bytes exceeds max\n", msg.length());
+      return;
+    }
+    
     // Queue for loop() - no blocking here
     txQueue = msg;
     txPending = true;
     
-    if (chatIndex < 100) {
-      chatHistory[chatIndex] = "[TX] " + msg;
-      chatIndex++;
-    }
+    // Add to history (ring buffer - wrap around if needed)
+    chatHistory[chatIndex % 100] = "[TX] " + msg;
+    chatIndex++;
     
-    request->send(200, "application/json", "{\"status\":\"ok\"}");
+    request->send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Message queued for transmission\"}");
     dbg.printf("[TX] Queued (%d bytes)\n", msg.length());
   }, NULL,
   [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
@@ -623,7 +663,7 @@ void setupWebRoutes() {
     request->send(200, "application/json", response);
   });
 
-  // Save config API
+  // Save config API - with validation
   server.on("/api/config", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
   [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
     DynamicJsonDocument doc(512);
@@ -634,20 +674,76 @@ void setupWebRoutes() {
       return;
     }
     
-    // Update config - matches actual E220 registers
-    if (doc.containsKey("freq")) e220_config.freq = doc["freq"];
-    if (doc.containsKey("txpower")) e220_config.txpower = doc["txpower"];
-    if (doc.containsKey("baud")) e220_config.baud = doc["baud"];
+    // Validate and update config - matches actual E220 registers
+    if (doc.containsKey("freq")) {
+      float freq = doc["freq"];
+      if (!isValidFrequency(freq)) {
+        dbg.printf("[CONFIG] Invalid frequency: %.3f (range: 850.125-930.125)\n", freq);
+        request->send(400, "application/json", "{\"error\":\"Invalid frequency (850.125-930.125 MHz)\"}");
+        return;
+      }
+      e220_config.freq = freq;
+    }
+    
+    if (doc.containsKey("txpower")) {
+      int power = doc["txpower"];
+      if (!isValidTxPower(power)) {
+        dbg.printf("[CONFIG] Invalid TX power: %d (valid: 30,27,24,21 dBm)\n", power);
+        request->send(400, "application/json", "{\"error\":\"Invalid TX power (21,24,27,30 dBm)\"}");
+        return;
+      }
+      e220_config.txpower = power;
+    }
+    
+    if (doc.containsKey("baud")) {
+      int baud = doc["baud"];
+      if (!isValidBaud(baud)) {
+        dbg.printf("[CONFIG] Invalid baud rate: %d\n", baud);
+        request->send(400, "application/json", "{\"error\":\"Invalid baud rate\"}");
+        return;
+      }
+      e220_config.baud = baud;
+    }
+    
     if (doc.containsKey("addr")) strlcpy(e220_config.addr, doc["addr"], sizeof(e220_config.addr));
     if (doc.containsKey("dest")) strlcpy(e220_config.dest, doc["dest"], sizeof(e220_config.dest));
-    if (doc.containsKey("airrate")) e220_config.airrate = doc["airrate"];
-    if (doc.containsKey("subpkt")) e220_config.subpkt = doc["subpkt"];
+    
+    if (doc.containsKey("airrate")) {
+      int rate = doc["airrate"];
+      if (!isValidAirRate(rate)) {
+        dbg.printf("[CONFIG] Invalid air rate: %d\n", rate);
+        request->send(400, "application/json", "{\"error\":\"Invalid air rate (0-7)\"}");
+        return;
+      }
+      e220_config.airrate = rate;
+    }
+    
+    if (doc.containsKey("subpkt")) {
+      int subpkt = doc["subpkt"];
+      if (!isValidSubPacketSize(subpkt)) {
+        dbg.printf("[CONFIG] Invalid subpacket size: %d\n", subpkt);
+        request->send(400, "application/json", "{\"error\":\"Invalid subpacket size (0-3)\"}");
+        return;
+      }
+      e220_config.subpkt = subpkt;
+    }
+    
     if (doc.containsKey("parity")) e220_config.parity = doc["parity"];
     if (doc.containsKey("txmode")) e220_config.txmode = doc["txmode"];
     if (doc.containsKey("rssi_noise")) e220_config.rssi_noise = doc["rssi_noise"];
     if (doc.containsKey("rssi_byte")) e220_config.rssi_byte = doc["rssi_byte"];
     if (doc.containsKey("lbt")) e220_config.lbt = doc["lbt"];
-    if (doc.containsKey("wor_cycle")) e220_config.wor_cycle = doc["wor_cycle"];
+    
+    if (doc.containsKey("wor_cycle")) {
+      int wor = doc["wor_cycle"];
+      if (!isValidWORCycle(wor)) {
+        dbg.printf("[CONFIG] Invalid WOR cycle: %d\n", wor);
+        request->send(400, "application/json", "{\"error\":\"Invalid WOR cycle (0-7)\"}");
+        return;
+      }
+      e220_config.wor_cycle = wor;
+    }
+    
     if (doc.containsKey("crypt_h")) e220_config.crypt_h = doc["crypt_h"];
     if (doc.containsKey("crypt_l")) e220_config.crypt_l = doc["crypt_l"];
     if (doc.containsKey("savetype")) e220_config.savetype = doc["savetype"];
@@ -662,7 +758,7 @@ void setupWebRoutes() {
     // Always apply config to the E220 module
     applyE220Config();
     
-    request->send(200, "application/json", "{\"status\":\"ok\"}");
+    request->send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Config updated and applied to E220\"}");
   });
 
   // Debug log API - returns new serial output since last poll
@@ -778,7 +874,7 @@ void setupWebRoutes() {
     request->send(200, "application/json", "{\"status\":\"disconnected\"}");
   });
 
-  // WiFi AP settings API
+  // WiFi AP settings API - with validation
   server.on("/api/wifi/ap", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
   [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
     DynamicJsonDocument doc(256);
@@ -788,16 +884,38 @@ void setupWebRoutes() {
     }
     const char* ssid = doc["ssid"] | "";
     const char* pass = doc["password"] | "";
-    if (strlen(ssid) > 0) {
+    
+    String errors = "";
+    
+    if (strlen(ssid) == 0) {
+      errors += "SSID required; ";
+    } else if (strlen(ssid) > 32) {
+      errors += "SSID too long (max 32 chars); ";
+    } else {
       preferences.putString("ap_ssid", ssid);
       strlcpy(wifi_config.ap_ssid, ssid, sizeof(wifi_config.ap_ssid));
+      dbg.printf("[WiFi] AP SSID updated: %s\n", ssid);
     }
-    if (strlen(pass) >= 8) {
-      preferences.putString("ap_pass", pass);
-      strlcpy(wifi_config.ap_password, pass, sizeof(wifi_config.ap_password));
+    
+    if (strlen(pass) > 0) {
+      if (strlen(pass) < 8) {
+        errors += "Password too short (min 8 chars); ";
+      } else if (strlen(pass) > 63) {
+        errors += "Password too long (max 63 chars); ";
+      } else {
+        preferences.putString("ap_pass", pass);
+        strlcpy(wifi_config.ap_password, pass, sizeof(wifi_config.ap_password));
+        dbg.printf("[WiFi] AP password updated\n");
+      }
     }
-    dbg.printf("[WiFi] AP settings saved: SSID=%s (reboot required)\n", wifi_config.ap_ssid);
-    request->send(200, "application/json", "{\"status\":\"saved\",\"note\":\"Reboot to apply\"}");
+    
+    if (errors.length() > 0) {
+      dbg.printf("[WiFi] AP settings validation errors: %s\n", errors.c_str());
+      request->send(400, "application/json", "{\"error\":\"" + errors + "\"}");
+    } else {
+      dbg.printf("[WiFi] AP settings saved: SSID=%s (reboot required)\n", wifi_config.ap_ssid);
+      request->send(200, "application/json", "{\"status\":\"saved\",\"message\":\"Reboot to apply new AP settings\"}");
+    }
   });
 
   server.begin();
@@ -908,8 +1026,8 @@ void processRxPacket() {
     }
     msg.trim();
     
-    if (msg.length() > 0 && chatIndex < 100) {
-      chatHistory[chatIndex] = "[RX] " + msg;
+    if (msg.length() > 0) {
+      chatHistory[chatIndex % 100] = "[RX] " + msg;
       chatIndex++;
       dbg.printf("[RX] (%d bytes)\n", msg.length());
     }
@@ -1026,10 +1144,8 @@ void handleUSBSerial() {
       }
       e220Serial.flush();
       
-      if (chatIndex < 100) {
-        chatHistory[chatIndex] = "[TX] " + input;
-        chatIndex++;
-      }
+      chatHistory[chatIndex % 100] = "[TX] " + input;
+      chatIndex++;
       dbg.printf("[TX] (%d bytes) %s\n", inputLen, input.c_str());
     }
   }
