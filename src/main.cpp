@@ -55,7 +55,7 @@ struct {
 
 HardwareSerial e220Serial(2);
 String chatHistory[100];
-int chatIndex = 0;
+uint32_t chatIndex = 0;  // Changed to uint32_t to prevent overflow after 2.1B messages
 
 /**
  * Validation Helper Functions
@@ -97,6 +97,19 @@ bool isValidBaud(int baud) {
     if (baudTable[i] == baud) return true;
   }
   return false;
+}
+
+// Validate hex address string format (0xHHLL where H,L are hex digits)
+bool isValidHexAddress(const char *addr) {
+  if (!addr || strlen(addr) != 6) return false;  // "0xHHLL" = 6 chars
+  if (addr[0] != '0' || (addr[1] != 'x' && addr[1] != 'X')) return false;
+  for (int i = 2; i < 6; i++) {
+    char c = addr[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Debug log ring buffer - captures Serial output for web debug tab
@@ -141,6 +154,11 @@ DebugPrint dbg;
 // This avoids blocking the async_tcp task and triggering the watchdog
 String txQueue = "";
 bool txPending = false;
+
+// Diagnostics: track communication errors
+uint32_t e220_timeout_count = 0;  // Count of E220 AUX timeouts
+uint32_t e220_rx_errors = 0;      // Count of RX protocol errors
+uint32_t e220_tx_errors = 0;      // Count of TX protocol errors
 
 /**
  * E220 Configuration Structure
@@ -248,7 +266,8 @@ bool waitE220Ready(uint32_t timeout_ms = 5000) {
     }
     delay(10);  // Poll every 10ms to avoid hogging CPU
   }
-  dbg.printf("[E220] Timeout waiting for AUX ready after %u ms\n", timeout_ms);
+  e220_timeout_count++;  // Track timeout for diagnostics
+  dbg.printf("[E220] Timeout waiting for AUX ready after %u ms (total timeouts: %u)\n", timeout_ms, e220_timeout_count);
   return false;
 }
 
@@ -803,8 +822,24 @@ void setupWebRoutes() {
       e220_config.baud = baud;
     }
     
-    if (doc.containsKey("addr")) strlcpy(e220_config.addr, doc["addr"], sizeof(e220_config.addr));
-    if (doc.containsKey("dest")) strlcpy(e220_config.dest, doc["dest"], sizeof(e220_config.dest));
+    if (doc.containsKey("addr")) {
+      const char *addr = doc["addr"];
+      if (!isValidHexAddress(addr)) {
+        dbg.printf("[CONFIG] Invalid address format: %s (must be 0xHHLL)\n", addr);
+        request->send(400, "application/json", "{\"error\":\"Invalid address format (use 0xHHLL)\"}");
+        return;
+      }
+      strlcpy(e220_config.addr, addr, sizeof(e220_config.addr));
+    }
+    if (doc.containsKey("dest")) {
+      const char *dest = doc["dest"];
+      if (!isValidHexAddress(dest)) {
+        dbg.printf("[CONFIG] Invalid destination format: %s (must be 0xHHLL)\n", dest);
+        request->send(400, "application/json", "{\"error\":\"Invalid destination format (use 0xHHLL)\"}");
+        return;
+      }
+      strlcpy(e220_config.dest, dest, sizeof(e220_config.dest));
+    }
     
     if (doc.containsKey("airrate")) {
       int rate = doc["airrate"];
@@ -1014,6 +1049,21 @@ void setupWebRoutes() {
       dbg.printf("[WiFi] AP settings saved: SSID=%s (reboot required)\n", wifi_config.ap_ssid);
       request->send(200, "application/json", "{\"status\":\"saved\",\"message\":\"Reboot to apply new AP settings\"}");
     }
+  });
+
+  // Diagnostics API - returns E220 communication stats
+  server.on("/api/diagnostics", HTTP_GET, [](AsyncWebServerRequest *request) {
+    DynamicJsonDocument doc(512);
+    doc["e220_timeouts"] = e220_timeout_count;
+    doc["e220_rx_errors"] = e220_rx_errors;
+    doc["e220_tx_errors"] = e220_tx_errors;
+    doc["uptime_ms"] = millis();
+    doc["free_heap"] = ESP.getFreeHeap();
+    doc["heap_fragmentation"] = 100 - (ESP.getLargestFreeBlock() * 100 / ESP.getFreeHeap());
+    
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
   });
 
   server.begin();

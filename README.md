@@ -225,13 +225,26 @@ Both are API-compatible; just adjust TX Power in CONFIG tab.
 
 MIT
 
+## Recent Improvements
+
+### Code Quality & Robustness (2026-03-24)
+- **Hex address validation** — Added `isValidHexAddress()` to validate 0xHHLL format for module and destination addresses
+- **Chat history overflow protection** — Changed chatIndex from `int` to `uint32_t` to prevent overflow after 2.1B messages
+- **Diagnostics API** — New `/api/diagnostics` endpoint tracks:
+  - E220 AUX timeout count
+  - RX/TX protocol error counts
+  - System uptime, free heap, and heap fragmentation percentage
+- **Timeout diagnostics** — E220 timeout handler now increments counter for troubleshooting
+- **Input validation** — Address and destination fields now validated before config apply
+
 ## Commits
 
-- **0ec5d21** — Fix crash on large RX messages, pre-allocate strings, RSSI stripping (current)
+- **Current** — Add hex address validation, diagnostics API, timeout tracking
+- **0ec5d21** — Fix crash on large RX messages, pre-allocate strings, RSSI stripping
 - **dfbace5** — Fixed E220 register protocol per datasheet, added Restart button
 - **bb3d678** — Serial type-to-send, slash commands
 
 ---
 
-**Last updated:** 2026-03-23  
+**Last updated:** 2026-03-24  
 **Tested on:** 2× ESP32-DevKit + E220-900T22S @ 930.125 MHz, 2.4 kbps
