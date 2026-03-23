@@ -112,6 +112,17 @@ bool isValidHexAddress(const char *addr) {
   return true;
 }
 
+// Generate dynamic AP SSID from chip ID (last 3 bytes of MAC address)
+// Format: "E220-Chat-AABBCC" where AABBCC is the last 3 bytes of MAC in hex
+String generateAPSSID() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char ssid[32];
+  snprintf(ssid, sizeof(ssid), "E220-Chat-%02X%02X%02X", 
+           mac[3], mac[4], mac[5]);  // Last 3 bytes of MAC
+  return String(ssid);
+}
+
 // Debug log ring buffer - captures Serial output for web debug tab
 #define DEBUG_LOG_SIZE 4096
 char debugLogBuf[DEBUG_LOG_SIZE];
@@ -582,19 +593,18 @@ void setupWiFi() {
   strlcpy(wifi_config.password, savedPass.c_str(), sizeof(wifi_config.password));
 
   // Load saved AP settings with defaults
-  // Generate random AP name only once (first boot), then persist it
-  String apSSID, apPass;
-  if (preferences.isKey("ap_ssid")) {
-    apSSID = preferences.getString("ap_ssid");
+  // AP SSID is now dynamically generated from chip ID (last 3 bytes of MAC)
+  // This ensures each device has a unique SSID based on its hardware
+  String apSSID = generateAPSSID();
+  String apPass;
+  if (preferences.isKey("ap_pass")) {
     apPass = preferences.getString("ap_pass", "password123");
   } else {
-    // First boot: generate random AP name and save it
-    int randomNum = random(100, 1000);
-    apSSID = "E220-Chat-" + String(randomNum);
+    // First boot: set default password
     apPass = "password123";
-    preferences.putString("ap_ssid", apSSID);
     preferences.putString("ap_pass", apPass);
   }
+  // Note: AP SSID is no longer persisted since it's always derived from chip ID
   strlcpy(wifi_config.ap_ssid, apSSID.c_str(), sizeof(wifi_config.ap_ssid));
   strlcpy(wifi_config.ap_password, apPass.c_str(), sizeof(wifi_config.ap_password));
 
@@ -939,19 +949,51 @@ void setupWebRoutes() {
     request->send(200, "application/json", response);
   });
 
-  // WiFi scan API
+  // WiFi scan API - scan for available networks
+  // Note: WiFi scan requires STA mode to be active. If in AP-only mode, 
+  // we temporarily enable STA mode, perform the scan, then restore mode.
   server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
-    int n = WiFi.scanNetworks();
     DynamicJsonDocument doc(2048);
     JsonArray networks = doc.createNestedArray("networks");
-    for (int i = 0; i < n && i < 20; i++) {
-      JsonObject net = networks.createNestedObject();
-      net["ssid"] = WiFi.SSID(i);
-      net["rssi"] = WiFi.RSSI(i);
-      net["encryption"] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Encrypted";
-      net["channel"] = WiFi.channel(i);
+    
+    // Check current mode and enable STA if needed for scanning
+    wifi_mode_t currentMode = WiFi.getMode();
+    bool needsModeRestore = (currentMode == WIFI_AP);
+    
+    if (needsModeRestore) {
+      // Temporarily enable STA mode for scanning
+      WiFi.mode(WIFI_AP_STA);
+      delay(100);  // Give WiFi subsystem time to switch
     }
-    WiFi.scanDelete();
+    
+    // Perform scan (async, show networks immediately)
+    int n = WiFi.scanNetworks(true);  // true = async scan (non-blocking)
+    
+    if (n < 0) {
+      // Scan failed or still in progress, return empty list
+      dbg.println("[WiFi] Scan failed");
+    } else if (n == 0) {
+      // Scan in progress, WiFi.scanNetworks() will return -2
+      // For now return what we have
+      dbg.println("[WiFi] Scan in progress or no networks found");
+    } else {
+      // Scan completed successfully
+      for (int i = 0; i < n && i < 20; i++) {
+        JsonObject net = networks.createNestedObject();
+        net["ssid"] = WiFi.SSID(i);
+        net["rssi"] = WiFi.RSSI(i);
+        net["encryption"] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Encrypted";
+        net["channel"] = WiFi.channel(i);
+      }
+      WiFi.scanDelete();
+    }
+    
+    // Restore original mode if needed
+    if (needsModeRestore) {
+      WiFi.mode(WIFI_AP);
+      delay(100);
+    }
+    
     String response;
     serializeJson(doc, response);
     request->send(200, "application/json", response);
@@ -1007,7 +1049,8 @@ void setupWebRoutes() {
     request->send(200, "application/json", "{\"status\":\"disconnected\"}");
   });
 
-  // WiFi AP settings API - with validation
+  // WiFi AP settings API - password only (SSID is now dynamic based on chip ID)
+  // SSID is automatically generated from MAC address and cannot be changed
   server.on("/api/wifi/ap", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
   [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
     DynamicJsonDocument doc(256);
@@ -1015,38 +1058,27 @@ void setupWebRoutes() {
       request->send(400, "application/json", "{\"error\":\"JSON parse error\"}");
       return;
     }
-    const char* ssid = doc["ssid"] | "";
     const char* pass = doc["password"] | "";
     
     String errors = "";
     
-    if (strlen(ssid) == 0) {
-      errors += "SSID required; ";
-    } else if (strlen(ssid) > 32) {
-      errors += "SSID too long (max 32 chars); ";
+    if (strlen(pass) == 0) {
+      errors += "Password required; ";
+    } else if (strlen(pass) < 8) {
+      errors += "Password too short (min 8 chars); ";
+    } else if (strlen(pass) > 63) {
+      errors += "Password too long (max 63 chars); ";
     } else {
-      preferences.putString("ap_ssid", ssid);
-      strlcpy(wifi_config.ap_ssid, ssid, sizeof(wifi_config.ap_ssid));
-      dbg.printf("[WiFi] AP SSID updated: %s\n", ssid);
-    }
-    
-    if (strlen(pass) > 0) {
-      if (strlen(pass) < 8) {
-        errors += "Password too short (min 8 chars); ";
-      } else if (strlen(pass) > 63) {
-        errors += "Password too long (max 63 chars); ";
-      } else {
-        preferences.putString("ap_pass", pass);
-        strlcpy(wifi_config.ap_password, pass, sizeof(wifi_config.ap_password));
-        dbg.printf("[WiFi] AP password updated\n");
-      }
+      preferences.putString("ap_pass", pass);
+      strlcpy(wifi_config.ap_password, pass, sizeof(wifi_config.ap_password));
+      dbg.printf("[WiFi] AP password updated\n");
     }
     
     if (errors.length() > 0) {
       dbg.printf("[WiFi] AP settings validation errors: %s\n", errors.c_str());
       request->send(400, "application/json", "{\"error\":\"" + errors + "\"}");
     } else {
-      dbg.printf("[WiFi] AP settings saved: SSID=%s (reboot required)\n", wifi_config.ap_ssid);
+      dbg.printf("[WiFi] AP settings saved: SSID=%s, password updated (reboot required)\n", wifi_config.ap_ssid);
       request->send(200, "application/json", "{\"status\":\"saved\",\"message\":\"Reboot to apply new AP settings\"}");
     }
   });
@@ -1058,8 +1090,12 @@ void setupWebRoutes() {
     doc["e220_rx_errors"] = e220_rx_errors;
     doc["e220_tx_errors"] = e220_tx_errors;
     doc["uptime_ms"] = millis();
-    doc["free_heap"] = ESP.getFreeHeap();
-    doc["heap_fragmentation"] = 100 - (ESP.getLargestFreeBlock() * 100 / ESP.getFreeHeap());
+    uint32_t freeHeap = ESP.getFreeHeap();
+    uint32_t maxAllocHeap = ESP.getMaxAllocHeap();
+    doc["free_heap"] = freeHeap;
+    doc["max_alloc_heap"] = maxAllocHeap;
+    // Calculate fragmentation: if max allocatable block is significantly less than free heap, fragmentation is high
+    doc["heap_fragmentation"] = (maxAllocHeap < freeHeap) ? ((freeHeap - maxAllocHeap) * 100 / freeHeap) : 0;
     
     String response;
     serializeJson(doc, response);
