@@ -630,14 +630,10 @@ void setupWiFi() {
       dbg.print("[WiFi] STA connected, IP: ");
       dbg.println(WiFi.localIP());
     } else {
-      dbg.println("[WiFi] STA connection failed, AP-only mode");
-      WiFi.mode(WIFI_AP);
-      WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
+      dbg.println("[WiFi] STA connection failed, staying in AP+STA mode for scanning");
     }
   } else {
-    dbg.println("[WiFi] No saved STA credentials, AP-only mode");
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
+    dbg.println("[WiFi] No saved STA credentials, AP+STA mode for scanning");
   }
 }
 
@@ -956,28 +952,16 @@ void setupWebRoutes() {
     DynamicJsonDocument doc(2048);
     JsonArray networks = doc.createNestedArray("networks");
     
-    // Check current mode and enable STA if needed for scanning
-    wifi_mode_t currentMode = WiFi.getMode();
-    bool needsModeRestore = (currentMode == WIFI_AP);
-    
-    if (needsModeRestore) {
-      // Temporarily enable STA mode for scanning
-      WiFi.mode(WIFI_AP_STA);
-      delay(100);  // Give WiFi subsystem time to switch
-    }
-    
-    // Perform scan (async, show networks immediately)
-    int n = WiFi.scanNetworks(true);  // true = async scan (non-blocking)
+    // Already in AP_STA mode, scan synchronously
+    dbg.println("[WiFi] Starting network scan...");
+    int n = WiFi.scanNetworks(false);  // false = synchronous (blocking) scan
     
     if (n < 0) {
-      // Scan failed or still in progress, return empty list
-      dbg.println("[WiFi] Scan failed");
+      dbg.printf("[WiFi] Scan failed with error %d\n", n);
     } else if (n == 0) {
-      // Scan in progress, WiFi.scanNetworks() will return -2
-      // For now return what we have
-      dbg.println("[WiFi] Scan in progress or no networks found");
+      dbg.println("[WiFi] No networks found");
     } else {
-      // Scan completed successfully
+      dbg.printf("[WiFi] Found %d networks\n", n);
       for (int i = 0; i < n && i < 20; i++) {
         JsonObject net = networks.createNestedObject();
         net["ssid"] = WiFi.SSID(i);
@@ -986,12 +970,6 @@ void setupWebRoutes() {
         net["channel"] = WiFi.channel(i);
       }
       WiFi.scanDelete();
-    }
-    
-    // Restore original mode if needed
-    if (needsModeRestore) {
-      WiFi.mode(WIFI_AP);
-      delay(100);
     }
     
     String response;
@@ -1043,9 +1021,7 @@ void setupWebRoutes() {
     preferences.remove("sta_pass");
     wifi_config.ssid[0] = '\0';
     wifi_config.password[0] = '\0';
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
-    dbg.println("[WiFi] Disconnected STA, cleared credentials");
+    dbg.println("[WiFi] Disconnected STA, cleared credentials, staying in AP+STA mode");
     request->send(200, "application/json", "{\"status\":\"disconnected\"}");
   });
 
