@@ -1101,7 +1101,8 @@
             <h3>AP Settings</h3>
             <div class="form-group">
               <label>AP SSID</label>
-              <input type="text" id="ap-ssid" placeholder="Access point name">
+              <input type="text" id="ap-ssid" placeholder="Hardware-derived" readonly>
+              <div class="help-text">SSID is generated from the device MAC address</div>
             </div>
             <div class="form-group">
               <label>AP Password</label>
@@ -1135,6 +1136,54 @@
       document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
       document.getElementById(tabName).classList.add('active');
       event.target.classList.add('active');
+    }
+
+    async function ensureAdminAuth() {
+      let token = sessionStorage.getItem('admin_token');
+      if (token) return token;
+
+      const password = prompt('Enter admin password (same password used to join the device AP)');
+      if (!password) throw new Error('Authentication cancelled');
+
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password })
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.token) {
+        throw new Error(data.error || 'Authentication failed');
+      }
+
+      sessionStorage.setItem('admin_token', data.token);
+      return data.token;
+    }
+
+    async function adminFetch(url, options = {}, retry = true) {
+      const token = await ensureAdminAuth();
+      const headers = Object.assign({}, options.headers || {}, { 'X-Admin-Token': token });
+      const response = await fetch(url, Object.assign({}, options, { headers }));
+      if (response.status === 401 && retry) {
+        sessionStorage.removeItem('admin_token');
+        return adminFetch(url, options, false);
+      }
+      return response;
+    }
+
+    async function pollOperation(expectedType) {
+      for (;;) {
+        const response = await adminFetch('/api/operation');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Operation status failed');
+        if (data.type !== expectedType) {
+          await new Promise(resolve => setTimeout(resolve, 300));
+          continue;
+        }
+        if (data.state === 'success') return data;
+        if (data.state === 'error') throw new Error(data.message || 'Operation failed');
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
     }
 
     function sendMsg() {
@@ -1195,29 +1244,29 @@
       if (e.key === 'Enter') sendMsg();
     });
 
-    let lastCount = 0;
+    let lastTotalMessages = -1;
     setInterval(() => {
       fetch('/api/chat')
         .then(r => r.json())
         .then(data => {
           const m = document.getElementById('messages');
-          if (data.history.length > lastCount) {
-            const newMsgs = data.history.slice(lastCount);
-            newMsgs.forEach(msg => {
+          if (data.total_messages !== lastTotalMessages) {
+            m.innerHTML = '';
+            (data.history || []).forEach(msg => {
               const type = msg.includes('[TX]') ? 'sent' : 'received';
               const msgEl = document.createElement('div');
               msgEl.className = `message ${type}`;
               msgEl.innerHTML = `<div class="bubble">${escapeHtml(msg.replace(/\[(TX|RX)\]\s*/, ''))}</div>`;
               m.appendChild(msgEl);
             });
-            lastCount = data.history.length;
+            lastTotalMessages = data.total_messages;
             m.scrollTop = m.scrollHeight;
           }
         })
         .catch(e => console.error(e));
     }, 1000);
 
-    function saveConfig() {
+    async function saveConfig() {
       const freq_custom = document.getElementById('freq_custom').value;
       const config = {
         freq: freq_custom ? parseFloat(freq_custom) : parseFloat(document.getElementById('freq').value),
@@ -1250,27 +1299,24 @@
       status.textContent = '⟳ Saving configuration...';
       status.className = 'status success';
 
-      fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config)
-      })
-        .then(r => {
-          if (!r.ok) return r.json().then(d => Promise.reject(d));
-          return r.json();
-        })
-        .then(data => {
-          status.textContent = '✓ Configuration saved and applied to E220 module';
-          status.className = 'status success';
-          // Auto-hide after 5 seconds
-          setTimeout(() => { status.className = 'status'; }, 5000);
-        })
-        .catch(err => {
-          const errorMsg = err.error || err.message || 'Failed to save configuration';
-          status.textContent = '✗ Error: ' + errorMsg;
-          status.className = 'status error';
-          console.error('Config save error:', err);
+      try {
+        const response = await adminFetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(config)
         });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Failed to queue configuration');
+        await pollOperation('apply_config');
+        status.textContent = '✓ Configuration saved and applied to E220 module';
+        status.className = 'status success';
+        setTimeout(() => { status.className = 'status'; }, 5000);
+      } catch (err) {
+        const errorMsg = err.message || 'Failed to save configuration';
+        status.textContent = '✗ Error: ' + errorMsg;
+        status.className = 'status error';
+        console.error('Config save error:', err);
+      }
     }
 
     function quickSave() {
@@ -1284,18 +1330,15 @@
       });
     }
 
-    function rebootESP() {
+    async function rebootESP() {
       if (!confirm('Restart ESP32? You will need to reconnect to WiFi.')) return;
       const status = document.getElementById('status');
       status.textContent = '⟳ Restarting ESP32...';
       status.className = 'status success';
-      fetch('/api/reboot', { method: 'POST' })
-        .then(() => {
-          status.textContent = '⟳ ESP32 is restarting. Reconnect to WiFi in ~5 seconds...';
-        })
-        .catch(() => {
-          status.textContent = '⟳ ESP32 is restarting. Reconnect to WiFi in ~5 seconds...';
-        });
+      try {
+        await adminFetch('/api/reboot', { method: 'POST' });
+      } catch (_) {}
+      status.textContent = '⟳ ESP32 is restarting. Reconnect to WiFi in ~5 seconds...';
     }
 
     // WiFi functions
@@ -1340,17 +1383,22 @@
           document.getElementById('ws-sta-rssi').textContent = d.sta_rssi + ' dBm';
         }
         document.getElementById('disconnect-btn').style.display = show ? '' : 'none';
-        document.getElementById('ap-ssid').placeholder = d.ap_ssid;
+        document.getElementById('ap-ssid').value = d.ap_ssid;
       }).catch(() => {});
     }
 
-    function wifiScan() {
+    async function wifiScan() {
       const btn = document.getElementById('scan-btn');
       const list = document.getElementById('network-list');
       btn.disabled = true;
       btn.textContent = 'Scanning...';
       list.innerHTML = '<div style="color:#9ca3af;font-size:13px;padding:8px">Scanning for networks...</div>';
-      fetch('/api/wifi/scan').then(r => r.json()).then(d => {
+      try {
+        const queued = await adminFetch('/api/wifi/scan');
+        const queuedData = await queued.json();
+        if (!queued.ok) throw new Error(queuedData.error || 'Failed to queue WiFi scan');
+        const op = await pollOperation('wifi_scan');
+        const d = op.result || {};
         list.innerHTML = '';
         if (!d.networks || d.networks.length === 0) {
           list.innerHTML = '<div style="color:#9ca3af;font-size:13px;padding:8px">No networks found</div>';
@@ -1366,47 +1414,53 @@
             list.appendChild(item);
           });
         }
-      }).catch(() => {
-        list.innerHTML = '<div style="color:#991b1b;font-size:13px;padding:8px">Scan failed</div>';
-      }).finally(() => {
+      } catch (err) {
+        list.innerHTML = '<div style="color:#991b1b;font-size:13px;padding:8px">' + escapeHtml(err.message || 'Scan failed') + '</div>';
+      } finally {
         btn.disabled = false;
         btn.textContent = 'Scan Networks';
-      });
+      }
     }
 
-    function wifiConnect() {
+    async function wifiConnect() {
       const ssid = document.getElementById('wifi-ssid').value.trim();
       const pass = document.getElementById('wifi-pass').value;
       if (!ssid) { wifiMsg('Enter an SSID', 'error'); return; }
       wifiMsg('Connecting to ' + ssid + '...', 'info');
-      fetch('/api/wifi/connect', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ssid: ssid, password: pass})
-      }).then(r => r.json()).then(d => {
-        if (d.status === 'connected') {
-          wifiMsg('Connected! IP: ' + d.ip, 'success');
+      try {
+        const response = await adminFetch('/api/wifi/connect', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ssid: ssid, password: pass})
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Failed to queue WiFi connection');
+        const op = await pollOperation('wifi_connect');
+        const result = op.result || {};
+        if (result.status === 'connected') {
+          wifiMsg('Connected! IP: ' + result.ip, 'success');
         } else {
           wifiMsg('Connection failed. Check credentials.', 'error');
         }
         wifiStatus();
-      }).catch(() => wifiMsg('Network error', 'error'));
+      } catch (err) {
+        wifiMsg(err.message || 'Network error', 'error');
+      }
     }
 
-    function wifiDisconnect() {
+    async function wifiDisconnect() {
       wifiMsg('Disconnecting...', 'info');
-      fetch('/api/wifi/disconnect', {method:'POST'}).then(r => r.json()).then(() => {
+      adminFetch('/api/wifi/disconnect', {method:'POST'}).then(r => r.json()).then(() => {
         wifiMsg('Disconnected', 'success');
         wifiStatus();
       }).catch(() => wifiMsg('Error', 'error'));
     }
 
-    function wifiSaveAP() {
-      const ssid = document.getElementById('ap-ssid').value.trim();
+    async function wifiSaveAP() {
       const pass = document.getElementById('ap-pass').value;
       
-      if (!ssid && !pass) {
-        wifiMsg('Enter AP SSID or password', 'error');
+      if (!pass) {
+        wifiMsg('Enter a new AP password', 'error');
         return;
       }
       
@@ -1415,29 +1469,24 @@
         return;
       }
       
-      const body = {};
-      if (ssid) body.ssid = ssid;
-      if (pass) body.password = pass;
+      const body = { password: pass };
       
       wifiMsg('Saving AP settings...', 'info');
-      
-      fetch('/api/wifi/ap', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(body)
-      })
-        .then(r => {
-          if (!r.ok) return r.json().then(d => Promise.reject(d));
-          return r.json();
-        })
-        .then(d => {
-          wifiMsg('✓ AP settings saved. Reboot to apply new settings.', 'success');
-        })
-        .catch(err => {
-          const errorMsg = err.error || err.message || 'Error saving AP settings';
-          wifiMsg('✗ ' + errorMsg, 'error');
-          console.error('AP save error:', err);
+
+      try {
+        const response = await adminFetch('/api/wifi/ap', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body)
         });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Error saving AP settings');
+        sessionStorage.removeItem('admin_token');
+        wifiMsg('✓ AP password saved. Use the new password after reboot.', 'success');
+      } catch (err) {
+        wifiMsg('✗ ' + (err.message || 'Error saving AP settings'), 'error');
+        console.error('AP save error:', err);
+      }
     }
 
     // Auto-refresh wifi status when tab is active

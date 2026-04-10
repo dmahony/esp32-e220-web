@@ -66,7 +66,10 @@ pio run -t upload --upload-port /dev/ttyUSB1
 
 ### 3. Connect & Test
 
-Each device creates a WiFi AP: `E220-Chat-XXX` (password: `password123`)
+Each device creates a WiFi AP: `E220-Chat-XXX`
+
+Default AP password is now generated per device from the MAC address (format: `e220-AABBCC`) and printed to serial on first boot.
+Admin actions in the web UI require that AP password.
 
 **Via Web:**
 1. Connect phone/laptop to `E220-Chat-XXX`

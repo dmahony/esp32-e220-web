@@ -31,6 +31,7 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <esp_system.h>
 
 // GPIO Pin assignments for E220 module
 #define E220_RX_PIN   21              // UART2 RX from E220
@@ -46,16 +47,50 @@
 AsyncWebServer server(80);
 Preferences preferences;
 
+static const size_t CHAT_HISTORY_SIZE = 100;
+static const uint32_t ADMIN_SESSION_TTL_MS = 30UL * 60UL * 1000UL;
+
+enum OperationType {
+  OP_NONE,
+  OP_APPLY_CONFIG,
+  OP_WIFI_SCAN,
+  OP_WIFI_CONNECT
+};
+
+enum OperationState {
+  OP_STATE_IDLE,
+  OP_STATE_PENDING,
+  OP_STATE_RUNNING,
+  OP_STATE_SUCCESS,
+  OP_STATE_ERROR
+};
+
 struct {
   char ssid[64];
   char password[64];
   char ap_ssid[64];
   char ap_password[64];
-} wifi_config = {"", "", "", "password123"};
+} wifi_config = {"", "", "", ""};
 
 HardwareSerial e220Serial(2);
-String chatHistory[100];
-uint32_t chatIndex = 0;  // Changed to uint32_t to prevent overflow after 2.1B messages
+String chatHistory[CHAT_HISTORY_SIZE];
+size_t chatHistoryStart = 0;
+size_t chatHistoryCount = 0;
+uint32_t chatSequence = 0;
+String adminSessionToken = "";
+uint32_t adminSessionExpiresAt = 0;
+
+struct {
+  OperationType type;
+  OperationState state;
+  String message;
+  String resultJson;
+  char wifi_ssid[64];
+  char wifi_password[64];
+} operationState = {OP_NONE, OP_STATE_IDLE, "", "", "", ""};
+
+bool rebootPending = false;
+uint32_t rebootRequestedAt = 0;
 
 /**
  * Validation Helper Functions
@@ -121,6 +156,132 @@ String generateAPSSID() {
   snprintf(ssid, sizeof(ssid), "E220-Chat-%02X%02X%02X", 
            mac[3], mac[4], mac[5]);  // Last 3 bytes of MAC
   return String(ssid);
+}
+
+String generateDefaultAPPassword() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char password[20];
+  snprintf(password, sizeof(password), "e220-%02X%02X%02X", mac[3], mac[4], mac[5]);
+  return String(password);
+}
+
+void clearChatHistory() {
+  chatHistoryStart = 0;
+  chatHistoryCount = 0;
+}
+
+void addChatHistory(const String &message) {
+  size_t index = (chatHistoryStart + chatHistoryCount) % CHAT_HISTORY_SIZE;
+  if (chatHistoryCount == CHAT_HISTORY_SIZE) {
+    index = chatHistoryStart;
+    chatHistoryStart = (chatHistoryStart + 1) % CHAT_HISTORY_SIZE;
+  } else {
+    chatHistoryCount++;
+  }
+  chatHistory[index] = message;
+  chatSequence++;
+}
+
+const String &getChatHistoryItem(size_t logicalIndex) {
+  return chatHistory[(chatHistoryStart + logicalIndex) % CHAT_HISTORY_SIZE];
+}
+
+const char *operationTypeName(OperationType type) {
+  switch (type) {
+    case OP_APPLY_CONFIG: return "apply_config";
+    case OP_WIFI_SCAN: return "wifi_scan";
+    case OP_WIFI_CONNECT: return "wifi_connect";
+    default: return "none";
+  }
+}
+
+const char *operationStateName(OperationState state) {
+  switch (state) {
+    case OP_STATE_PENDING: return "pending";
+    case OP_STATE_RUNNING: return "running";
+    case OP_STATE_SUCCESS: return "success";
+    case OP_STATE_ERROR: return "error";
+    default: return "idle";
+  }
+}
+
+void clearCompletedOperation() {
+  if (operationState.state == OP_STATE_SUCCESS || operationState.state == OP_STATE_ERROR) {
+    operationState.type = OP_NONE;
+    operationState.state = OP_STATE_IDLE;
+    operationState.message = "";
+    operationState.resultJson = "";
+    operationState.wifi_ssid[0] = '\0';
+    operationState.wifi_password[0] = '\0';
+  }
+}
+
+bool queueOperation(OperationType type, const String &message) {
+  if (operationState.state == OP_STATE_PENDING || operationState.state == OP_STATE_RUNNING) {
+    return false;
+  }
+  clearCompletedOperation();
+  operationState.type = type;
+  operationState.state = OP_STATE_PENDING;
+  operationState.message = message;
+  operationState.resultJson = "";
+  return true;
+}
+
+bool isAdminSessionValid() {
+  return adminSessionToken.length() > 0 && millis() < adminSessionExpiresAt;
+}
+
+void resetAdminSession() {
+  adminSessionToken = "";
+  adminSessionExpiresAt = 0;
+}
+
+String generateAdminToken() {
+  char token[33];
+  uint32_t r1 = esp_random();
+  uint32_t r2 = esp_random();
+  snprintf(token, sizeof(token), "%08lx%08lx", (unsigned long)r1, (unsigned long)r2);
+  return String(token);
+}
+
+bool isAdminAuthorized(AsyncWebServerRequest *request) {
+  if (!isAdminSessionValid()) {
+    resetAdminSession();
+    return false;
+  }
+  if (!request->hasHeader("X-Admin-Token")) {
+    return false;
+  }
+  String token = request->header("X-Admin-Token");
+  return token == adminSessionToken;
+}
+
+bool requireAdmin(AsyncWebServerRequest *request) {
+  if (isAdminAuthorized(request)) {
+    adminSessionExpiresAt = millis() + ADMIN_SESSION_TTL_MS;
+    return true;
+  }
+  request->send(401, "application/json", "{\"error\":\"admin authentication required\"}");
+  return false;
+}
+
+String buildOperationStatusJson() {
+  DynamicJsonDocument doc(1024);
+  doc["type"] = operationTypeName(operationState.type);
+  doc["state"] = operationStateName(operationState.state);
+  doc["message"] = operationState.message;
+  if (operationState.resultJson.length() > 0) {
+    JsonVariant result = doc["result"];
+    DeserializationError error = deserializeJson(result, operationState.resultJson);
+    if (error) {
+      doc["result_raw"] = operationState.resultJson;
+    }
+  }
+  String response;
+  serializeJson(doc, response);
+  return response;
 }
 
 // Debug log ring buffer - captures Serial output for web debug tab
@@ -598,11 +759,11 @@ void setupWiFi() {
   String apSSID = generateAPSSID();
   String apPass;
   if (preferences.isKey("ap_pass")) {
-    apPass = preferences.getString("ap_pass", "password123");
+    apPass = preferences.getString("ap_pass", generateDefaultAPPassword());
   } else {
-    // First boot: set default password
-    apPass = "password123";
+    apPass = generateDefaultAPPassword();
     preferences.putString("ap_pass", apPass);
+    dbg.printf("[WiFi] Generated default AP password: %s\n", apPass.c_str());
   }
   // Note: AP SSID is no longer persisted since it's always derived from chip ID
   strlcpy(wifi_config.ap_ssid, apSSID.c_str(), sizeof(wifi_config.ap_ssid));
@@ -613,6 +774,8 @@ void setupWiFi() {
   WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
   dbg.print("[WiFi] AP SSID: ");
   dbg.println(wifi_config.ap_ssid);
+  dbg.print("[WiFi] AP password: ");
+  dbg.println(wifi_config.ap_password);
   dbg.print("[WiFi] AP IP: ");
   dbg.println(WiFi.softAPIP());
 
@@ -694,8 +857,10 @@ void setupWebRoutes() {
   server.on("/api/chat", HTTP_GET, [](AsyncWebServerRequest *request) {
     DynamicJsonDocument doc(16384);
     JsonArray history = doc.createNestedArray("history");
-    for (int i = 0; i < chatIndex; i++) {
-      history.add(chatHistory[i]);
+    doc["total_messages"] = chatSequence;
+    doc["history_size"] = chatHistoryCount;
+    for (size_t i = 0; i < chatHistoryCount; i++) {
+      history.add(getChatHistoryItem(i));
     }
     String json;
     serializeJson(doc, json);
@@ -746,8 +911,7 @@ void setupWebRoutes() {
     txPending = true;
     
     // Add to history (ring buffer - wrap around if needed)
-    chatHistory[chatIndex % 100] = "[TX] " + msg;
-    chatIndex++;
+    addChatHistory("[TX] " + msg);
     
     request->send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Message queued for transmission\"}");
     dbg.printf("[TX] Queued (%d bytes)\n", msg.length());
@@ -789,6 +953,7 @@ void setupWebRoutes() {
   // Save config API - with validation
   server.on("/api/config", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
   [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    if (!requireAdmin(request)) return;
     DynamicJsonDocument doc(512);
     DeserializationError error = deserializeJson(doc, (const char*)data, len);
     
@@ -894,10 +1059,40 @@ void setupWebRoutes() {
     dbg.printf("  rssi_noise=%d rssi_byte=%d lbt=%d wor=%d\n", e220_config.rssi_noise, e220_config.rssi_byte, e220_config.lbt, e220_config.wor_cycle);
     dbg.printf("  crypt=0x%02X%02X savetype=%d\n", e220_config.crypt_h, e220_config.crypt_l, e220_config.savetype);
     
-    // Always apply config to the E220 module
-    applyE220Config();
-    
-    request->send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Config updated and applied to E220\"}");
+    if (!queueOperation(OP_APPLY_CONFIG, "Applying E220 configuration")) {
+      request->send(409, "application/json", "{\"error\":\"Another operation is already running\"}");
+      return;
+    }
+
+    request->send(202, "application/json", "{\"status\":\"queued\",\"message\":\"Config update queued\"}");
+  });
+
+  server.on("/api/auth/login", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+  [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, (const char*)data, len)) {
+      request->send(400, "application/json", "{\"error\":\"JSON parse error\"}");
+      return;
+    }
+    const char *password = doc["password"] | "";
+    if (strlen(password) == 0) {
+      request->send(400, "application/json", "{\"error\":\"Password required\"}");
+      return;
+    }
+    if (String(password) != String(wifi_config.ap_password)) {
+      resetAdminSession();
+      request->send(401, "application/json", "{\"error\":\"Invalid password\"}");
+      return;
+    }
+    adminSessionToken = generateAdminToken();
+    adminSessionExpiresAt = millis() + ADMIN_SESSION_TTL_MS;
+    String response = "{\"status\":\"ok\",\"token\":\"" + adminSessionToken + "\"}";
+    request->send(200, "application/json", response);
+  });
+
+  server.on("/api/operation", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAdmin(request)) return;
+    request->send(200, "application/json", buildOperationStatusJson());
   });
 
   // Debug log API - returns new serial output since last poll
@@ -921,10 +1116,11 @@ void setupWebRoutes() {
 
   // Reboot API
   server.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest *request) {
-    request->send(200, "application/json", "{\"status\":\"rebooting\"}");
+    if (!requireAdmin(request)) return;
+    rebootPending = true;
+    rebootRequestedAt = millis();
+    request->send(202, "application/json", "{\"status\":\"queued\",\"message\":\"Reboot scheduled\"}");
     dbg.println("[SYS] Reboot requested via web");
-    delay(500);
-    ESP.restart();
   });
 
   // WiFi status API
@@ -949,37 +1145,18 @@ void setupWebRoutes() {
   // Note: WiFi scan requires STA mode to be active. If in AP-only mode, 
   // we temporarily enable STA mode, perform the scan, then restore mode.
   server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
-    DynamicJsonDocument doc(2048);
-    JsonArray networks = doc.createNestedArray("networks");
-    
-    // Already in AP_STA mode, scan synchronously
-    dbg.println("[WiFi] Starting network scan...");
-    int n = WiFi.scanNetworks(false);  // false = synchronous (blocking) scan
-    
-    if (n < 0) {
-      dbg.printf("[WiFi] Scan failed with error %d\n", n);
-    } else if (n == 0) {
-      dbg.println("[WiFi] No networks found");
-    } else {
-      dbg.printf("[WiFi] Found %d networks\n", n);
-      for (int i = 0; i < n && i < 20; i++) {
-        JsonObject net = networks.createNestedObject();
-        net["ssid"] = WiFi.SSID(i);
-        net["rssi"] = WiFi.RSSI(i);
-        net["encryption"] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Encrypted";
-        net["channel"] = WiFi.channel(i);
-      }
-      WiFi.scanDelete();
+    if (!requireAdmin(request)) return;
+    if (!queueOperation(OP_WIFI_SCAN, "Scanning WiFi networks")) {
+      request->send(409, "application/json", "{\"error\":\"Another operation is already running\"}");
+      return;
     }
-    
-    String response;
-    serializeJson(doc, response);
-    request->send(200, "application/json", response);
+    request->send(202, "application/json", "{\"status\":\"queued\",\"message\":\"WiFi scan queued\"}");
   });
 
   // WiFi connect API
   server.on("/api/wifi/connect", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
   [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    if (!requireAdmin(request)) return;
     DynamicJsonDocument doc(256);
     if (deserializeJson(doc, (const char*)data, len)) {
       request->send(400, "application/json", "{\"error\":\"JSON parse error\"}");
@@ -991,31 +1168,18 @@ void setupWebRoutes() {
       request->send(400, "application/json", "{\"error\":\"SSID required\"}");
       return;
     }
-    // Save credentials
-    preferences.putString("sta_ssid", ssid);
-    preferences.putString("sta_pass", pass);
-    strlcpy(wifi_config.ssid, ssid, sizeof(wifi_config.ssid));
-    strlcpy(wifi_config.password, pass, sizeof(wifi_config.password));
-
-    // Attempt connection
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
-    WiFi.begin(ssid, pass);
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-      delay(250);
+    if (!queueOperation(OP_WIFI_CONNECT, "Connecting to WiFi")) {
+      request->send(409, "application/json", "{\"error\":\"Another operation is already running\"}");
+      return;
     }
-    if (WiFi.status() == WL_CONNECTED) {
-      dbg.printf("[WiFi] Connected to %s, IP: %s\n", ssid, WiFi.localIP().toString().c_str());
-      request->send(200, "application/json", "{\"status\":\"connected\",\"ip\":\"" + WiFi.localIP().toString() + "\"}");
-    } else {
-      dbg.printf("[WiFi] Failed to connect to %s\n", ssid);
-      request->send(200, "application/json", "{\"status\":\"failed\"}");
-    }
+    strlcpy(operationState.wifi_ssid, ssid, sizeof(operationState.wifi_ssid));
+    strlcpy(operationState.wifi_password, pass, sizeof(operationState.wifi_password));
+    request->send(202, "application/json", "{\"status\":\"queued\",\"message\":\"WiFi connect queued\"}");
   });
 
   // WiFi disconnect API
   server.on("/api/wifi/disconnect", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAdmin(request)) return;
     WiFi.disconnect(true);
     preferences.remove("sta_ssid");
     preferences.remove("sta_pass");
@@ -1029,6 +1193,7 @@ void setupWebRoutes() {
   // SSID is automatically generated from MAC address and cannot be changed
   server.on("/api/wifi/ap", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
   [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    if (!requireAdmin(request)) return;
     DynamicJsonDocument doc(256);
     if (deserializeJson(doc, (const char*)data, len)) {
       request->send(400, "application/json", "{\"error\":\"JSON parse error\"}");
@@ -1047,6 +1212,7 @@ void setupWebRoutes() {
     } else {
       preferences.putString("ap_pass", pass);
       strlcpy(wifi_config.ap_password, pass, sizeof(wifi_config.ap_password));
+      resetAdminSession();
       dbg.printf("[WiFi] AP password updated\n");
     }
     
@@ -1161,15 +1327,14 @@ void processRxPacket() {
     }
     msg.trim();
     
-    if (msg.length() > 0 && chatIndex < 100) {
+    if (msg.length() > 0) {
       String display;
       display.reserve(msg.length() + 40);
       display = "[RX] " + msg;
       if (rssiRaw >= 0) {
         display += " [RSSI:" + String(lastRssi) + "dBm]";
       }
-      chatHistory[chatIndex] = display;
-      chatIndex++;
+      addChatHistory(display);
       dbg.printf("[RX] (%d bytes)", msg.length());
       if (rssiRaw >= 0) dbg.printf(" [RSSI:%d dBm]", lastRssi);
       dbg.println();
@@ -1187,8 +1352,7 @@ void processRxPacket() {
     msg.trim();
     
     if (msg.length() > 0) {
-      chatHistory[chatIndex % 100] = "[RX] " + msg;
-      chatIndex++;
+      addChatHistory("[RX] " + msg);
       dbg.printf("[RX] (%d bytes)\n", msg.length());
     }
   }
@@ -1242,13 +1406,13 @@ void handleUSBSerial() {
       readE220Config();
     }
     else if (input == "/history") {
-      dbg.printf("[HISTORY] %d messages:\n", chatIndex);
-      for (int i = 0; i < chatIndex; i++) {
-        dbg.printf("  %d: %s\n", i, chatHistory[i].c_str());
+      dbg.printf("[HISTORY] %d stored messages:\n", (int)chatHistoryCount);
+      for (size_t i = 0; i < chatHistoryCount; i++) {
+        dbg.printf("  %d: %s\n", (int)i, getChatHistoryItem(i).c_str());
       }
     }
     else if (input == "/clear") {
-      chatIndex = 0;
+      clearChatHistory();
       dbg.println("[OK] History cleared");
     }
     else if (input == "/factory") {
@@ -1304,8 +1468,7 @@ void handleUSBSerial() {
       }
       e220Serial.flush();
       
-      chatHistory[chatIndex % 100] = "[TX] " + input;
-      chatIndex++;
+      addChatHistory("[TX] " + input);
       dbg.printf("[TX] (%d bytes) %s\n", inputLen, input.c_str());
     }
   }
@@ -1329,6 +1492,90 @@ void setup() {
 }
 
 // Drain TX queue from loop() context where blocking is safe
+
+void handleQueuedOperations() {
+  if (operationState.state != OP_STATE_PENDING) return;
+
+  operationState.state = OP_STATE_RUNNING;
+
+  if (operationState.type == OP_APPLY_CONFIG) {
+    dbg.println("[OP] Applying queued E220 config");
+    applyE220Config();
+    operationState.resultJson = "{\"status\":\"ok\"}";
+    operationState.message = "E220 configuration applied";
+    operationState.state = OP_STATE_SUCCESS;
+    return;
+  }
+
+  if (operationState.type == OP_WIFI_SCAN) {
+    dbg.println("[OP] Starting queued WiFi scan...");
+    DynamicJsonDocument doc(2048);
+    JsonArray networks = doc.createNestedArray("networks");
+    int n = WiFi.scanNetworks(false);
+
+    if (n < 0) {
+      dbg.printf("[WiFi] Scan failed with error %d\n", n);
+      operationState.resultJson = "{\"error\":\"scan failed\"}";
+      operationState.message = "WiFi scan failed";
+      operationState.state = OP_STATE_ERROR;
+      return;
+    }
+
+    dbg.printf("[WiFi] Found %d networks\n", n);
+    for (int i = 0; i < n && i < 20; i++) {
+      JsonObject net = networks.createNestedObject();
+      net["ssid"] = WiFi.SSID(i);
+      net["rssi"] = WiFi.RSSI(i);
+      net["encryption"] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Encrypted";
+      net["channel"] = WiFi.channel(i);
+    }
+    WiFi.scanDelete();
+    serializeJson(doc, operationState.resultJson);
+    operationState.message = "WiFi scan complete";
+    operationState.state = OP_STATE_SUCCESS;
+    return;
+  }
+
+  if (operationState.type == OP_WIFI_CONNECT) {
+    preferences.putString("sta_ssid", operationState.wifi_ssid);
+    preferences.putString("sta_pass", operationState.wifi_password);
+    strlcpy(wifi_config.ssid, operationState.wifi_ssid, sizeof(wifi_config.ssid));
+    strlcpy(wifi_config.password, operationState.wifi_password, sizeof(wifi_config.password));
+
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP(wifi_config.ap_ssid, wifi_config.ap_password);
+    WiFi.begin(operationState.wifi_ssid, operationState.wifi_password);
+
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+      delay(250);
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      dbg.printf("[WiFi] Connected to %s, IP: %s\n", operationState.wifi_ssid, WiFi.localIP().toString().c_str());
+      operationState.resultJson = "{\"status\":\"connected\",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+      operationState.message = "WiFi connected";
+      operationState.state = OP_STATE_SUCCESS;
+    } else {
+      dbg.printf("[WiFi] Failed to connect to %s\n", operationState.wifi_ssid);
+      operationState.resultJson = "{\"status\":\"failed\"}";
+      operationState.message = "WiFi connection failed";
+      operationState.state = OP_STATE_ERROR;
+    }
+    return;
+  }
+
+  operationState.type = OP_NONE;
+  operationState.state = OP_STATE_IDLE;
+}
+
+void handlePendingReboot() {
+  if (rebootPending && millis() - rebootRequestedAt >= 250) {
+    dbg.println("[SYS] Rebooting now");
+    ESP.restart();
+  }
+}
+
 void handleTxQueue() {
   if (!txPending) return;
   
@@ -1362,5 +1609,7 @@ void loop() {
   handleE220Serial();
   handleUSBSerial();
   handleTxQueue();
+  handleQueuedOperations();
+  handlePendingReboot();
   delay(10);
 }
